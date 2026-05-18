@@ -1,0 +1,21 @@
+{
+  "name": "pi-slim",
+  "version": "0.1.0",
+  "description": "Slim chrome for pi: collapses the editor footer into 2 rows by merging spinner, cwd, branch, ctx %, model, and thinking level into the top border.",
+  "type": "module",
+  "main": "index.ts",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "bunx tsc --noEmit"
+  },
+  "keywords": ["pi", "pi-coding-agent", "extension"],
+  "author": "superresistant",
+  "repository": "github:superresistant/pi-slim",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.71.0"
+  }
+}
