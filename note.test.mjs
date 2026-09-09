@@ -7,6 +7,9 @@ import test from 'node:test';
 import { configureEditor, NotesEditor } from './note.mjs';
 import { openNote, timestamp } from './store.mjs';
 
+const notesModule = new URL('./note.mjs', import.meta.url).href;
+const storeModule = new URL('./store.mjs', import.meta.url).href;
+
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'pi-notes-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -52,6 +55,60 @@ test('stale lock recovery and visible persistence errors', t => {
   mkdirSync(`${reopened.path}.${process.pid}.tmp`);
   assert.throws(() => reopened.save('must not report saved'));
   assert.equal(readFileSync(reopened.path, 'utf8'), '');
+});
+
+test('image clipboard and screenshot paths persist through undo and reopening', t => {
+  const options = fixture(t);
+  execFileSync('xvfb-run', ['-a', process.execPath, '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { execFileSync } from 'node:child_process';
+    import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+    import { dirname, join } from 'node:path';
+    import { configureEditor, NotesEditor, pasteClipboard } from ${JSON.stringify(notesModule)};
+    import { openNote } from ${JSON.stringify(storeModule)};
+    const options = ${JSON.stringify(options)};
+    const note = openNote(options);
+    const { keys, theme } = configureEditor();
+    assert.ok(keys.matches('\\x16', 'app.clipboard.pasteImage'));
+    const editor = new NotesEditor({ terminal: { rows: 24 }, requestRender() {} }, theme);
+    editor.onChange = () => note.save(editor.getExpandedText());
+    const copy = (mime, bytes) => execFileSync('xclip', ['-selection', 'clipboard', '-t', mime, '-i'], {
+      input: bytes, stdio: ['pipe', 'ignore', 'ignore'], timeout: 5000,
+    });
+    const image = execFileSync('convert', ['-size', '3x2', 'xc:red', 'png:-']);
+    copy('image/png', image);
+    await pasteClipboard(editor, note);
+    const imagePath = editor.getExpandedText();
+    assert.equal(dirname(imagePath), join(dirname(note.path), 'images'));
+    assert.equal(execFileSync('identify', ['-format', '%wx%h', imagePath], { encoding: 'utf8' }), '3x2');
+    assert.equal(readFileSync(note.path, 'utf8'), imagePath);
+    editor.handleInput('\\x1a');
+    assert.equal(editor.getExpandedText(), '');
+    assert.ok(readFileSync(imagePath).length);
+    await pasteClipboard(editor, note);
+    assert.notEqual(editor.getExpandedText(), imagePath);
+    editor.insertTextAtCursor('\\n');
+    const screenshot = '/tmp/Capture d’écran 2026-09-09.png';
+    copy('UTF8_STRING', screenshot);
+    await pasteClipboard(editor, note);
+    assert.ok(editor.getExpandedText().endsWith('\\n' + screenshot));
+    assert.equal(readdirSync(join(dirname(note.path), 'images')).length, 2);
+    note.close();
+    const reopened = openNote(options);
+    assert.equal(reopened.text, editor.getExpandedText());
+    assert.ok(readFileSync(imagePath).length);
+    reopened.close();
+    const blocked = openNote({ ...options, session: 'blocked' });
+    writeFileSync(join(dirname(blocked.path), 'images'), 'not a directory');
+    copy('image/png', image);
+    const before = editor.getExpandedText();
+    await assert.rejects(pasteClipboard(editor, blocked));
+    assert.equal(editor.getExpandedText(), before);
+    blocked.close();
+  `], {
+    env: { ...process.env, WAYLAND_DISPLAY: '', XDG_SESSION_TYPE: 'x11' },
+    stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000,
+  });
 });
 
 test('timezone offsets include negative and half-hour zones', () => {

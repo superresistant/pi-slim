@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 export function timestamp(date = new Date()) {
   const offset = -date.getTimezoneOffset();
@@ -64,8 +64,15 @@ export function openNote({ cwd, session = '', originWindow = '', root = process.
       atomicWrite(metadataPath, JSON.stringify(metadata, null, 2) + '\n');
       return metadata.updated;
     }
+    function saveImage(bytes, extension) {
+      const images = resolve(dir, 'images');
+      mkdirSync(images, { recursive: true, mode: 0o700 });
+      const imagePath = join(images, `${randomUUID()}.${extension}`);
+      writeFileSync(imagePath, bytes, { mode: 0o600, flag: 'wx' });
+      return imagePath;
+    }
     save(text);
-    return { path, metadata, text, save, close };
+    return { path, metadata, text, save, saveImage, close };
   } catch (error) {
     close();
     throw error;

@@ -29,6 +29,21 @@ export function configureEditor(agentDir = process.env.PI_CODING_AGENT_DIR || jo
   return { keys, settings, theme: themes.getEditorTheme() };
 }
 
+export async function pasteClipboard(editor, note) {
+  const { readClipboardImage, extensionForImageMimeType } = await load('coding-agent/dist/utils/clipboard-image.js');
+  const image = await readClipboardImage();
+  if (image) {
+    const extension = extensionForImageMimeType(image.mimeType);
+    if (!extension) throw new Error(`Unsupported clipboard image: ${image.mimeType}`);
+    editor.insertTextAtCursor(note.saveImage(Buffer.from(image.bytes), extension));
+    return;
+  }
+  const { readClipboardText } = await load('coding-agent/dist/utils/clipboard.js');
+  spawnSync('clipclean', ['-q'], { stdio: 'ignore', timeout: 2000 });
+  const text = await readClipboardText();
+  if (text) editor.insertTextAtCursor(text);
+}
+
 export class NotesEditor extends tui.Editor {
   status = 'Saved';
   origin = '';
@@ -97,7 +112,15 @@ export async function main() {
     process.exit(saved ? 0 : 1);
   }
   screen.addInputListener(data => {
+    if (tui.isKeyRelease(data)) return;
     if (tui.matchesKey(data, 'ctrl+q')) { void close(); return { consume: true }; }
+    if (config.keys.matches(data, 'app.clipboard.pasteImage')) {
+      void pasteClipboard(editor, note).catch(error => {
+        editor.status = `PASTE FAILED: ${error.message}`;
+        screen.requestRender();
+      });
+      return { consume: true };
+    }
     if (config.keys.matches(data, 'app.editor.external')) {
       const dir = mkdtempSync(join(tmpdir(), 'pi-notes-'));
       const path = join(dir, 'scratch.md');
