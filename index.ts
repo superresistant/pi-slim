@@ -65,7 +65,8 @@ function fitBorderSegmented(
 
 function formatCwd(cwd: string): string {
 	const home = process.env.HOME;
-	return home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+	const display = home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+	return `\x1b]8;;pi-slim-copy:${encodeURIComponent(cwd)}\x1b\\${display}\x1b]8;;\x1b\\`;
 }
 
 function contextSegments(ctx: ExtensionContext): string[] {
