@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+def origin(tabs, window_id):
+    for os_window in tabs:
+        for tab in os_window['tabs']:
+            for window in tab['windows']:
+                if str(window['id']) == str(window_id):
+                    return tab, window
+    raise RuntimeError(f'Origin Kitty window {window_id} no longer exists')
+
+
+def launch(keep_focus=False):
+    socket = os.environ.get('KITTY_LISTEN_ON')
+    window_id = os.environ.get('KITTY_WINDOW_ID')
+    if not socket or not window_id:
+        raise RuntimeError('Run kitty-notes from Kitty')
+
+    def remote(*args):
+        return subprocess.check_output(['kitten', '@', '--to', socket, *args], text=True)
+
+    tab, window = origin(json.loads(remote('ls')), window_id)
+    variables = window.get('user_vars', {})
+    cwd = str(Path(variables.get('notes_cwd') or window['cwd']).resolve(strict=True))
+    session = variables.get('notes_session', variables.get('pi_session', ''))
+    for candidate in tab['windows']:
+        notes = candidate.get('user_vars', {})
+        if notes.get('notes_cwd') == cwd and notes.get('notes_session', '') == session:
+            if not keep_focus:
+                remote('focus-window', '--match', f"id:{candidate['id']}")
+            return candidate['id']
+    command = [
+        'launch', '--type=window', '--match', f"id:{tab['id']}",
+        '--source-window', f'id:{window_id}', '--next-to', f'id:{window_id}',
+        '--location=vsplit', '--cwd', cwd, '--copy-colors', '--title', 'Notes',
+        '--var', f'notes_cwd={cwd}', '--var', f'notes_session={session}',
+        '--env', 'PI_SESSION_FILE', '--env', 'PI_SESSION_ID',
+    ]
+    if keep_focus:
+        command.append('--keep-focus')
+    command.extend([shutil.which('node'), str(Path(__file__).resolve().with_name('note.mjs')),
+                    '--cwd', cwd, '--session', session, '--origin-window', str(window_id)])
+    return int(remote(*command).strip())
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Open or focus notes beside the originating Kitty pane')
+    parser.add_argument('--keep-focus', action='store_true')
+    args = parser.parse_args()
+    try:
+        print(launch(args.keep_focus))
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
+        print(f'kitty-notes: {error}', file=sys.stderr)
+        sys.exit(1)
