@@ -237,20 +237,48 @@ test("pending hint follows Inbox changes, not agent completion, without renderin
 	assert.equal(showsHint(f), false);
 });
 
-test("pending Alt+Enter passes only native submit intent and preserves the editor receiver", () => {
+test("pending Alt+Enter passes native intent and a round snapshot with the editor receiver", () => {
 	const calls = [];
+	const state = pendingDelivery();
+	const options = { submitIntent: "followUp", submitContext: { afterResults: state.pendingRound } };
 	const f = fixture(process.cwd(), {
-		delivery: pendingDelivery(),
+		delivery: state,
 		nativeSubmit(options) { calls.push({ receiver: this, options }); },
 	});
 	f.editor.setText("independent work");
 	f.editor.handleInput("\x1b\r");
-	assert.deepEqual(calls, [{ receiver: f.editor, options: { submitIntent: "followUp" } }]);
+	assert.deepEqual(calls, [{ receiver: f.editor, options }]);
+	assert.notEqual(calls[0].options.submitContext.afterResults, state.pendingRound);
+	assert.notEqual(calls[0].options.submitContext.afterResults.origin, state.pendingRound.origin);
 	assert.equal(f.editor.getText(), "independent work");
 	assert.equal(f.events.has("input"), false);
 	f.editor.handleInput("\x1b[13;3u");
 	assert.equal(calls.length, 2);
-	assert.deepEqual(calls[1].options, { submitIntent: "followUp" });
+	assert.deepEqual(calls[1].options, options);
+});
+
+test("each submission keeps its captured round across settlement, later rounds, and source mutation", () => {
+	const state = pendingDelivery();
+	const first = structuredClone(state.pendingRound);
+	const second = pendingDelivery("round-2");
+	const calls = [];
+	const f = fixture(process.cwd(), {
+		delivery: state,
+		nativeSubmit(options) {
+			calls.push(options);
+			if (calls.length === 1) {
+				state.pendingRound.origin.session = "/mutated/session.jsonl";
+				state.pendingRound.roundId = "mutated-round";
+				f.setDelivery({ ...state, pendingRound: null });
+				f.setDelivery(second);
+			}
+		},
+	});
+	f.editor.handleInput("\x1b\r");
+	assert.deepEqual(calls[0].submitContext, { afterResults: first });
+	f.editor.handleInput("\x1b\r");
+	assert.deepEqual(calls[1].submitContext, { afterResults: second.pendingRound });
+	assert.deepEqual(calls[0].submitContext, { afterResults: first });
 });
 
 test("pending normal Enter keeps native text and paste expansion without followUp intent", () => {
@@ -270,6 +298,7 @@ test("pending normal Enter keeps native text and paste expansion without followU
 	assert.equal(submitted.length, 1);
 	assert.equal(submitted[0][0], text);
 	assert.notEqual(submitted[0][1]?.submitIntent, "followUp");
+	assert.equal(submitted[0][1]?.submitContext, undefined);
 	assert.equal(f.editor.getText(), "");
 });
 
@@ -332,12 +361,24 @@ test("pending hint retains autocomplete rows and stays within narrow terminal wi
 });
 
 test("native submit contract smoke when the coordinated core build is available", (t) => {
-	const f = fixture(process.cwd(), { delivery: pendingDelivery() });
+	const state = pendingDelivery();
+	const f = fixture(process.cwd(), { delivery: state });
 	if (typeof f.editor.submit !== "function") return t.skip("coordinated core submit API is not built yet");
 	const calls = [];
+	const nativeSubmit = f.editor.submit;
+	let submittedContext;
+	f.editor.submit = function (options) {
+		submittedContext = options.submitContext;
+		return nativeSubmit.call(this, options);
+	};
 	f.editor.onSubmit = (text, options) => calls.push({ text, options });
 	f.editor.handleInput("\x1b[200~deferred paste\x1b[201~");
 	f.editor.handleInput("\x1b\r");
-	assert.deepEqual(calls, [{ text: "deferred paste", options: { submitIntent: "followUp" } }]);
+	assert.deepEqual(calls, [{
+		text: "deferred paste",
+		options: { submitIntent: "followUp", submitContext: { afterResults: state.pendingRound } },
+	}]);
+	assert.notEqual(calls[0].options.submitContext.afterResults, state.pendingRound);
+	assert.equal(calls[0].options.submitContext, submittedContext);
 	assert.equal(f.editor.getText(), "");
 });

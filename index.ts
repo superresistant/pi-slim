@@ -12,7 +12,7 @@ import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tu
 
 type Target = { pid: number; cwd: string; session: string };
 type PendingRound = { origin: Target; taskId: string; executionId: string; roundId: string; aggregateId: string };
-type IntentEditor = CustomEditor & { submit?: (options?: { submitIntent: "submit" | "followUp" }) => void };
+type IntentEditor = CustomEditor & { submit?: (options?: { submitIntent: "submit" | "followUp"; submitContext?: unknown }) => void };
 type DeliveryState = {
 	version: 1;
 	available: boolean;
@@ -216,7 +216,10 @@ export default function (pi: ExtensionAPI) {
 					refreshPendingRound();
 					const submit = this.pendingSubmit();
 					if (submit) {
-						if (!this.disableSubmit) submit.call(this, { submitIntent: "followUp" });
+						if (!this.disableSubmit) {
+							const submitContext = structuredClone({ afterResults: pendingRound });
+							submit.call(this, { submitIntent: "followUp", submitContext });
+						}
 						return;
 					}
 				}
