@@ -1,5 +1,6 @@
 /* Based on examples/extensions/border-status-editor.ts */
 
+import { realpathSync } from "node:fs";
 import {
 	CustomEditor,
 	type ExtensionAPI,
@@ -7,9 +8,23 @@ import {
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+
+type Target = { pid: number; cwd: string; session: string };
+type PendingRound = { origin: Target; taskId: string; executionId: string; roundId: string; aggregateId: string };
+type IntentEditor = CustomEditor & { submit?: (options?: { submitIntent: "submit" | "followUp" }) => void };
+type DeliveryState = {
+	version: 1;
+	available: boolean;
+	target?: Target;
+	phase?: string;
+	frozen?: boolean;
+	pendingRound?: PendingRound | null;
+	deferredCount?: number;
+};
 
 const SEP = " · ";
+const PENDING_HINT = "Enter: send now · Alt+Enter: after these results";
 
 /**
  * Render a horizontal rule with left/right segment lists inlaid into it.
@@ -86,6 +101,8 @@ export default function (pi: ExtensionAPI) {
 	let spinnerIndex = 0;
 	let spinnerTimer: ReturnType<typeof setInterval> | undefined;
 	let activeTui: TUI | undefined;
+	let activeContext: ExtensionContext | undefined;
+	let pendingRound: PendingRound | null = null;
 	let branchCache: string | undefined;
 	// Captured from inside the setFooter factory; lets the editor read extension statuses.
 	let footerDataRef:
@@ -103,6 +120,27 @@ export default function (pi: ExtensionAPI) {
 			spinnerTimer = undefined;
 		}
 	};
+
+	function refreshPendingRound() {
+		pendingRound = null;
+		if (activeContext) {
+			const state: DeliveryState = { version: 1, available: false };
+			try {
+				pi.events.emit("pi-handoff-queue:delivery-state:v1", state);
+				const session = activeContext.sessionManager.getSessionFile();
+				if (state.available && !state.frozen && state.phase === "ready" && session &&
+					state.target?.pid === process.pid && state.target.cwd === realpathSync(activeContext.cwd) &&
+					state.target.session === session && Number.isSafeInteger(state.deferredCount) && state.deferredCount! >= 0) {
+					pendingRound = state.pendingRound ?? null;
+				}
+			} catch {
+				pendingRound = null;
+			}
+		}
+		activeTui?.requestRender();
+	}
+
+	pi.events.on("pi-handoff-queue:changed:v1", refreshPendingRound);
 
 	pi.on("agent_start", () => {
 		if (!enabled) return;
@@ -125,10 +163,14 @@ export default function (pi: ExtensionAPI) {
 		stopSpinner();
 		activeTui = undefined;
 		footerDataRef = undefined;
+		activeContext = undefined;
+		pendingRound = null;
 		isWorking = false;
 	});
 
 	pi.on("session_start", (_event, ctx) => {
+		activeContext = ctx;
+		refreshPendingRound();
 		isWorking = false;
 		spinnerIndex = 0;
 		branchCache = undefined;
@@ -136,6 +178,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	function applySlim(ctx: ExtensionContext) {
+		refreshPendingRound();
 		ctx.ui.setWorkingVisible(false);
 
 		// Sink footer: renders nothing, but subscribes to live git branch updates and exposes
@@ -161,6 +204,29 @@ export default function (pi: ExtensionAPI) {
 			constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
 				super(tui, theme, keybindings, { paddingX: 1 });
 				activeTui = tui;
+			}
+
+			private pendingSubmit() {
+				const submit = (this as IntentEditor).submit;
+				return pendingRound && typeof submit === "function" ? submit : undefined;
+			}
+
+			handleInput(data: string) {
+				if (matchesKey(data, "alt+enter")) {
+					refreshPendingRound();
+					const submit = this.pendingSubmit();
+					if (submit) {
+						if (!this.disableSubmit) submit.call(this, { submitIntent: "followUp" });
+						return;
+					}
+				}
+				super.handleInput(data);
+			}
+
+			protected renderBottomBorder(width: number, hiddenLineCount: number): string {
+				return this.pendingSubmit()
+					? ctx.ui.theme.fg("muted", truncateToWidth(PENDING_HINT, width, ""))
+					: super.renderBottomBorder(width, hiddenLineCount);
 			}
 
 			render(width: number): string[] {
@@ -189,6 +255,7 @@ export default function (pi: ExtensionAPI) {
 				const borderColor = (text: string) => this.borderColor(text);
 				lines[0] = fitBorderSegmented(left, right, width, borderColor);
 				// Drop the bottom border row — all status info lives on top now.
+				if (this.pendingSubmit()) return lines;
 				return lines.slice(0, -1);
 			}
 		}
