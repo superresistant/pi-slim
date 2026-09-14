@@ -24,7 +24,6 @@ type DeliveryState = {
 };
 
 const SEP = " · ";
-const PENDING_HINT = "Enter: send now · Alt+Enter: after these results";
 
 /**
  * Render a horizontal rule with left/right segment lists inlaid into it.
@@ -226,12 +225,6 @@ export default function (pi: ExtensionAPI) {
 				super.handleInput(data);
 			}
 
-			protected renderBottomBorder(width: number, hiddenLineCount: number): string {
-				return this.pendingSubmit()
-					? ctx.ui.theme.fg("muted", truncateToWidth(PENDING_HINT, width, ""))
-					: super.renderBottomBorder(width, hiddenLineCount);
-			}
-
 			render(width: number): string[] {
 				const lines = super.render(width);
 				if (lines.length < 2) return lines;
@@ -258,7 +251,7 @@ export default function (pi: ExtensionAPI) {
 				const borderColor = (text: string) => this.borderColor(text);
 				lines[0] = fitBorderSegmented(left, right, width, borderColor);
 				// Drop the bottom border row — all status info lives on top now.
-				if (this.pendingSubmit()) return lines;
+				if (this.isShowingAutocomplete()) return lines;
 				return lines.slice(0, -1);
 			}
 		}

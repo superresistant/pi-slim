@@ -214,27 +214,32 @@ function pendingDelivery(roundId = "round-1") {
 }
 const showsHint = (f) => f.editor.render(100).some((line) => stripTerminalSequences(line) === pendingHint);
 
-test("pending hint follows Inbox changes, not agent completion, without rendering-time polling", () => {
+test("pending state follows Inbox changes, not agent completion, without rendering-time polling", () => {
 	const state = pendingDelivery();
-	const f = fixture(process.cwd(), { delivery: state, nativeSubmit() {} });
-	assert.equal(showsHint(f), true);
+	const calls = [];
+	const f = fixture(process.cwd(), { delivery: state, nativeSubmit(options) { calls.push(options); } });
+	let legacy = 0;
+	f.editor.onAction("app.message.followUp", () => { legacy++; });
 	const queries = f.queries;
 	f.editor.render(100);
 	f.editor.render(100);
 	assert.equal(f.queries, queries);
 	f.events.get("agent_start")();
 	f.events.get("agent_end")();
-	assert.equal(showsHint(f), true);
+	f.editor.handleInput("\x1b\r");
+	assert.equal(calls[0].submitContext.afterResults.roundId, "round-1");
 	f.setDelivery({ ...state, deferredCount: 2 });
-	assert.equal(showsHint(f), true);
-	const renders = f.renders;
+	f.editor.handleInput("\x1b\r");
+	assert.equal(calls[1].submitContext.afterResults.roundId, "round-1");
 	f.setDelivery({ ...state, pendingRound: null });
-	assert.ok(f.renders > renders);
-	assert.equal(showsHint(f), false);
+	f.editor.handleInput("\x1b\r");
+	assert.equal(legacy, 1);
 	f.setDelivery(pendingDelivery("round-2"));
-	assert.equal(showsHint(f), true);
+	f.editor.handleInput("\x1b\r");
+	assert.equal(calls[2].submitContext.afterResults.roundId, "round-2");
 	f.events.get("session_shutdown")();
-	assert.equal(showsHint(f), false);
+	f.editor.handleInput("\x1b\r");
+	assert.equal(legacy, 2);
 });
 
 test("pending Alt+Enter passes native intent and a round snapshot with the editor receiver", () => {
@@ -346,18 +351,36 @@ test("Alt+Enter requeries Inbox before dispatch and honors disableSubmit", () =>
 	assert.equal(legacy, 1);
 });
 
-test("pending hint retains autocomplete rows and stays within narrow terminal widths", () => {
-	const f = fixture(process.cwd(), { delivery: pendingDelivery(), nativeSubmit() {} });
-	for (const width of [10, 30, 70]) {
-		const lines = f.editor.render(width);
-		assert.ok(lines.every((line) => visibleWidth(line) <= width));
-		assert.equal(stripTerminalSequences(lines.at(-1)), pendingHint.slice(0, width));
+test("pending and nonpending editors have identical compact rows without a hint", () => {
+	const state = pendingDelivery();
+	const f = fixture(process.cwd(), { nativeSubmit() {} });
+	for (const text of ["", "one line", "first\nsecond\nthird"]) {
+		f.editor.setText(text);
+		for (const width of [10, 30, 100]) {
+			f.setDelivery({ ...state, pendingRound: null });
+			const normal = f.editor.render(width);
+			f.setDelivery(state);
+			const pending = f.editor.render(width);
+			assert.deepEqual(pending, normal);
+			assert.equal(pending.length, CustomEditor.prototype.render.call(f.editor, width).length - 1);
+			assert.ok(pending.every((line) => visibleWidth(line) <= width));
+			assert.equal(showsHint(f), false);
+		}
 	}
+});
+
+test("autocomplete rows remain intact with or without pending results", () => {
+	const state = pendingDelivery();
+	const f = fixture(process.cwd(), { nativeSubmit() {} });
 	f.editor.autocompleteState = "prefix";
 	f.editor.autocompleteList = { render: () => ["popup choice"] };
-	const lines = f.editor.render(100);
-	assert.equal(stripTerminalSequences(lines.at(-2)), pendingHint);
-	assert.equal(lines.at(-1).trim(), "popup choice");
+	const normal = f.editor.render(100);
+	f.setDelivery(state);
+	const pending = f.editor.render(100);
+	assert.deepEqual(pending, normal);
+	assert.equal(pending.length, CustomEditor.prototype.render.call(f.editor, 100).length);
+	assert.equal(pending.at(-1).trim(), "popup choice");
+	assert.equal(showsHint(f), false);
 });
 
 test("native submit contract smoke when the coordinated core build is available", (t) => {
