@@ -47,6 +47,9 @@ export async function pasteClipboard(editor, note) {
 export class NotesEditor extends tui.Editor {
   status = 'Saved';
   origin = '';
+  constructor(screen, theme, options) {
+    super(screen, theme, { ...options, collapsePastes: false });
+  }
   render(width) {
     const terminal = this.tui.terminal;
     const descriptor = Object.getOwnPropertyDescriptor(terminal, 'rows');

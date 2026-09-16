@@ -149,8 +149,9 @@ test('actual Pi editor: Enter, configured undo, Unicode, large paste, render and
   const paste = Array.from({ length: 100 }, (_, i) => `line ${i} é`).join('\n');
   editor.handleInput('\x1b[200~' + paste.slice(0, 100));
   editor.handleInput(paste.slice(100) + '\x1b[201~');
-  assert.match(editor.getText(), /\[paste #/);
-  assert.equal(readFileSync(note.path, 'utf8'), 'café 👩🏽‍💻 漢字\\\n' + paste);
+  assert.equal(editor.getText(), 'café 👩🏽‍💻 漢字\\\n' + paste);
+  assert.equal(editor.getText(), editor.getExpandedText());
+  assert.equal(readFileSync(note.path, 'utf8'), editor.getText());
   for (const width of [12, 24, 40, 80]) {
     const lines = editor.render(width);
     assert.ok(lines[0].includes('Notes'));
@@ -158,6 +159,11 @@ test('actual Pi editor: Enter, configured undo, Unicode, large paste, render and
   }
   editor.handleInput('\x1a');
   assert.equal(editor.getExpandedText(), 'café 👩🏽‍💻 漢字\\\n');
+  const singleLine = 'Long paste é '.repeat(1000);
+  editor.handleInput('\x1b[200~' + singleLine + '\x1b[201~');
+  assert.equal(editor.getText(), 'café 👩🏽‍💻 漢字\\\n' + singleLine);
+  editor.handleInput('\x1a');
+  assert.equal(editor.getText(), 'café 👩🏽‍💻 漢字\\\n');
   editor.setText(Array.from({ length: 60 }, (_, i) => `line ${i}`).join('\n'));
   assert.equal(editor.render(80).length, 16);
 });
