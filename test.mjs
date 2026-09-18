@@ -1,10 +1,35 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
+import { registerHooks } from "node:module";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { getOsc8LinkAtColumn, matchesKey, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import slim from "./index.ts";
+
+const wakeBackends = new Map();
+const wakeCallbacks = new Set();
+const wakeProofs = new WeakMap();
+const shutdowns = new Set();
+globalThis.__piSlimWakeFixture = {
+	pendingWakes: (owner) => wakeBackends.get(owner.session)?.query(owner) ?? Promise.resolve({ owner, known: false, pending: [] }),
+	watchPendingWakes(callback) { wakeCallbacks.add(callback); return () => wakeCallbacks.delete(callback); },
+	hasLivePendingWake(snapshot) { return wakeProofs.get(snapshot)?.() ?? false; },
+};
+const wakeModule = `const fixture = globalThis.__piSlimWakeFixture;
+export const pendingWakes = fixture.pendingWakes;
+export const watchPendingWakes = fixture.watchPendingWakes;
+export const hasLivePendingWake = fixture.hasLivePendingWake;`;
+registerHooks({ resolve(specifier, context, nextResolve) {
+	if (specifier.endsWith("/subagent/pending-wakes.ts")) return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(wakeModule)}` };
+	return nextResolve(specifier, context);
+} });
+afterEach(() => {
+	for (const shutdown of shutdowns) shutdown();
+	shutdowns.clear();
+	wakeBackends.clear();
+});
 
 const linkPattern = /\x1b\]8;;(pi-slim-copy:[^\x1b]*)\x1b\\([^\x1b]*)\x1b\]8;;\x1b\\/g;
 
@@ -35,11 +60,12 @@ function fixture(cwd, options = {}) {
 	let workingVisible;
 	const ctx = {
 		cwd,
+		mode: options.mode ?? "tui",
 		model: { id: "model" },
 		getContextUsage: () => ({ percent: 12, tokens: 6000 }),
 		isIdle: () => true,
 		sessionManager: {
-			getSessionFile: () => "/tmp/pi-slim-test-session.jsonl",
+			getSessionFile: () => options.session ?? "/tmp/pi-slim-test-session.jsonl",
 			getEntries: () => entries,
 			getEntry: (id) => entries.find(entry => entry.id === id),
 		},
@@ -66,6 +92,7 @@ function fixture(cwd, options = {}) {
 		getThinkingLevel: () => "off",
 	});
 	events.get("session_start")({}, ctx);
+	shutdowns.add(() => events.get("session_shutdown")());
 	return {
 		get editor() { return editor; }, events, commands, ctx, terminal, entries,
 		setParley(state) { parley = state; eventBus.emit("parley:pending-round-changed:v1", { version: 1 }); },
@@ -486,4 +513,136 @@ test("timestamp and waiting status never add rows and narrow splits retain conte
 		assert.ok(stripTerminalSequences(lines[0]).includes("12% 6k model"));
 	}
 	assert.ok(statusLine(f, 70).includes("16 Sep 14:37"));
+});
+
+const invalidateWakes = () => { for (const callback of wakeCallbacks) callback(); };
+async function helperFixture() {
+	const session = "/tmp/pi-slim-helper-fixture.jsonl";
+	const backend = {
+		calls: 0, validations: 0, known: true, live: true, pending: [{ run: "fixture-run", mode: "observe" }],
+		async query(owner) {
+			this.calls++;
+			this.owner = owner;
+			const snapshot = { owner, known: this.known, pending: this.pending };
+			wakeProofs.set(snapshot, () => { this.validations++; return this.live; });
+			return snapshot;
+		},
+	};
+	wakeBackends.set(session, backend);
+	const options = { session, entries: [stoppedEntry()] };
+	const f = fixture(process.cwd(), options);
+	await nextTurn();
+	assert.equal(backend.calls, 1);
+	return { f, backend, options };
+}
+
+test("helper status is owner-scoped, idle-only, compact, and does not advance the timestamp", async () => {
+	const { f, backend } = await helperFixture();
+	assert.deepEqual(backend.owner, { pid: process.pid, cwd: process.cwd(), session: f.ctx.sessionManager.getSessionFile() });
+	const rows = f.editor.render(150).length;
+	assert.ok(statusLine(f).includes("16 Sep 14:37 ───── waiting for wake"));
+	assert.equal(f.entries.length, 1);
+	f.editor.handleInput("draft");
+	assert.ok(statusLine(f).includes("16 Sep 14:37"));
+	const validations = backend.validations;
+	f.events.get("agent_start")();
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	assert.equal(backend.validations, validations);
+	f.events.get("agent_settled")();
+	await nextTurn();
+	assert.ok(statusLine(f).includes("waiting for wake"));
+	const stopped = f.entries.at(-1).data.at;
+	backend.pending = [];
+	invalidateWakes();
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	await nextTurn();
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	assert.equal(f.entries.at(-1).data.at, stopped);
+	backend.pending = [{ run: "launch-fixture", mode: "launch" }];
+	invalidateWakes(); await nextTurn();
+	assert.ok(statusLine(f).includes("waiting for wake"));
+	assert.equal(f.entries.at(-1).data.at, stopped);
+	assert.equal(f.editor.render(150).length, rows);
+});
+
+test("Parley names take precedence and helper custody loss hides on the next render without querying", async () => {
+	const { f, backend } = await helperFixture();
+	f.setParley({ handled: true, pendingRound: pendingDelivery().pendingRound, peers: [{ folder: "/work/pi-notify" }] });
+	assert.ok(statusLine(f).includes("parley with pi-notify"));
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	f.setParley({ handled: true, pendingRound: null, peers: [] });
+	assert.ok(statusLine(f).includes("waiting for wake"));
+	const calls = backend.calls;
+	backend.live = false;
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	assert.equal(backend.calls, calls);
+	assert.equal(f.entries.length, 1);
+});
+
+test("unknown helper evidence, empty results, query failures and wrong owners never advertise waiting", async () => {
+	const { f, backend } = await helperFixture();
+	backend.known = false;
+	invalidateWakes(); await nextTurn();
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	backend.known = true; backend.pending = [];
+	invalidateWakes(); await nextTurn();
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	backend.query = async () => { throw new Error("unavailable"); };
+	invalidateWakes(); await nextTurn();
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	backend.query = async owner => {
+		const snapshot = { owner: { ...owner, session: "/wrong.jsonl" }, known: true, pending: [{ run: "wrong", mode: "launch" }] };
+		wakeProofs.set(snapshot, () => true);
+		return snapshot;
+	};
+	invalidateWakes(); await nextTurn();
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+});
+
+test("helper invalidation bursts coalesce and never expose superseded query results", async () => {
+	const { f, backend } = await helperFixture();
+	const queries = [];
+	backend.query = owner => new Promise(resolve => queries.push({ owner, resolve }));
+	invalidateWakes(); invalidateWakes(); invalidateWakes();
+	assert.equal(queries.length, 1);
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	const stale = { owner: queries[0].owner, known: true, pending: [{ run: "stale", mode: "observe" }] };
+	wakeProofs.set(stale, () => true);
+	queries[0].resolve(stale);
+	await nextTurn();
+	assert.equal(queries.length, 2);
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	queries[1].resolve({ owner: queries[1].owner, known: true, pending: [] });
+	await nextTurn();
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+});
+
+test("session replacement discards late helper replies and disposes old lifecycle watchers", async () => {
+	const { f, backend, options } = await helperFixture();
+	assert.equal(wakeCallbacks.size, 1);
+	let resolveOld;
+	backend.query = owner => new Promise(resolve => { resolveOld = () => {
+		const snapshot = { owner, known: true, pending: [{ run: "old", mode: "observe" }] };
+		wakeProofs.set(snapshot, () => true); resolve(snapshot);
+	}; });
+	invalidateWakes();
+	options.session = "/tmp/pi-slim-successor-fixture.jsonl";
+	f.events.get("session_start")();
+	await nextTurn();
+	assert.equal(wakeCallbacks.size, 1);
+	resolveOld(); await nextTurn();
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	f.events.get("session_shutdown")();
+	assert.equal(wakeCallbacks.size, 0);
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+});
+
+test("non-TUI sessions do not query helper state or install filesystem watchers", async () => {
+	const session = "/tmp/pi-slim-rpc-fixture.jsonl";
+	let calls = 0;
+	wakeBackends.set(session, { query() { calls++; throw new Error("unexpected helper query"); } });
+	fixture(process.cwd(), { session, mode: "rpc" });
+	await nextTurn();
+	assert.equal(calls, 0);
+	assert.equal(wakeCallbacks.size, 0);
 });

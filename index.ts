@@ -2,6 +2,7 @@
 
 import { realpathSync } from "node:fs";
 import { basename } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	CustomEditor,
 	type ExtensionAPI,
@@ -13,6 +14,13 @@ import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tu
 
 type Target = { pid: number; cwd: string; session: string };
 type PendingRound = { origin: Target; taskId: string; executionId: string; roundId: string; aggregateId: string };
+type WakeSnapshot = { owner: Target; known: boolean; pending: { run: string; mode: "observe" | "launch" }[] };
+type WakeAdapter = {
+	pendingWakes(owner: Target): Promise<WakeSnapshot>;
+	watchPendingWakes(callback: () => void): () => void;
+	hasLivePendingWake(snapshot: WakeSnapshot): boolean;
+};
+type WakeScope = { owner: Target; adapter?: WakeAdapter; snapshot?: WakeSnapshot; dispose?: () => void; refreshing: boolean; dirty: boolean };
 type IntentEditor = CustomEditor & { submit?: (options?: { submitIntent: "submit" | "followUp"; submitContext?: unknown }) => void };
 type DeliveryState = {
 	version: 1;
@@ -124,6 +132,7 @@ export default function (pi: ExtensionAPI) {
 	let pendingRound: PendingRound | null = null;
 	let lastStopped: number | undefined;
 	let waitingReason = "";
+	let wakeScope: WakeScope | undefined;
 	let branchCache: string | undefined;
 	// Captured from inside the setFooter factory; lets the editor read extension statuses.
 	let footerDataRef:
@@ -159,6 +168,63 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		activeTui?.requestRender();
+	}
+
+	function stopWakeStatus() {
+		const previous = wakeScope;
+		wakeScope = undefined;
+		previous?.dispose?.();
+	}
+
+	function refreshWakes(scope: WakeScope) {
+		if (wakeScope !== scope || !scope.adapter) return;
+		scope.snapshot = undefined;
+		scope.dirty = true;
+		activeTui?.requestRender();
+		if (scope.refreshing) return;
+		scope.refreshing = true;
+		void (async () => {
+			while (wakeScope === scope && scope.dirty) {
+				scope.dirty = false;
+				let snapshot: WakeSnapshot | undefined;
+				try { snapshot = await scope.adapter!.pendingWakes(scope.owner); } catch { snapshot = undefined; }
+				if (wakeScope !== scope || scope.dirty) continue;
+				if (snapshot?.owner.pid === scope.owner.pid && snapshot.owner.cwd === scope.owner.cwd && snapshot.owner.session === scope.owner.session) {
+					scope.snapshot = snapshot;
+				}
+				activeTui?.requestRender();
+			}
+		})().finally(() => {
+			scope.refreshing = false;
+			if (wakeScope === scope && scope.dirty) refreshWakes(scope);
+		});
+	}
+
+	async function startWakeStatus(ctx: ExtensionContext) {
+		stopWakeStatus();
+		if (ctx.mode !== "tui") return;
+		const session = ctx.sessionManager.getSessionFile();
+		if (!session) return;
+		let scope: WakeScope | undefined;
+		try {
+			scope = { owner: { pid: process.pid, cwd: realpathSync(ctx.cwd), session }, refreshing: false, dirty: false };
+			wakeScope = scope;
+			const source = pathToFileURL(realpathSync(fileURLToPath(import.meta.url)));
+			const adapter: WakeAdapter = await import(new URL("../subagent/pending-wakes.ts", source).href);
+			if (wakeScope !== scope) return;
+			scope.adapter = adapter;
+			const current = scope;
+			scope.dispose = adapter.watchPendingWakes(() => refreshWakes(current));
+			refreshWakes(scope);
+		} catch {
+			if (wakeScope === scope) stopWakeStatus();
+		}
+	}
+
+	function helperIsWaiting(): boolean {
+		const scope = wakeScope;
+		if (!scope?.snapshot?.known || !scope.snapshot.pending.length || !scope.adapter) return false;
+		try { return scope.adapter.hasLivePendingWake(scope.snapshot); } catch { return false; }
 	}
 
 	function refreshWaiting() {
@@ -205,10 +271,12 @@ export default function (pi: ExtensionAPI) {
 		isWorking = !ctx.isIdle();
 		if (!isWorking) stopSpinner();
 		refreshWaiting();
+		if (wakeScope) refreshWakes(wakeScope);
 		activeTui?.requestRender();
 	});
 
 	pi.on("session_shutdown", () => {
+		stopWakeStatus();
 		stopSpinner();
 		activeTui = undefined;
 		footerDataRef = undefined;
@@ -221,6 +289,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		activeContext = ctx;
+		void startWakeStatus(ctx);
 		lastStopped = undefined;
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (entry.type !== "custom") continue;
@@ -313,7 +382,7 @@ export default function (pi: ExtensionAPI) {
 				const borderColor = (text: string) => this.borderColor(text);
 				lines[0] = fitBorderSegmented(left, right, width, borderColor, [
 					lastStopped === undefined ? "" : formatStopped(lastStopped),
-					isWorking ? "" : waitingReason,
+					isWorking ? "" : waitingReason || (helperIsWaiting() ? "waiting for wake" : ""),
 				]);
 				// Drop the bottom border row — all status info lives on top now.
 				if (this.isShowingAutocomplete()) return lines;
