@@ -11,7 +11,8 @@
   },
   "scripts": {
     "check": "bunx tsc --noEmit",
-    "test": "node --experimental-strip-types --test test.mjs"
+    "test": "node --experimental-strip-types --test test.mjs",
+    "test:helper": "node --experimental-strip-types --test helper-integration.test.mjs"
   },
   "keywords": ["pi", "pi-coding-agent", "extension"],
   "author": "superresistant",
