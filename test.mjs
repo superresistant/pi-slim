@@ -13,6 +13,8 @@ function fixture(cwd, options = {}) {
 	const bus = new Map();
 	const commands = new Map();
 	let delivery = options.delivery;
+	let parley = options.parley;
+	const entries = options.entries ?? [];
 	let queries = 0;
 	let renders = 0;
 	const eventBus = {
@@ -22,6 +24,7 @@ function fixture(cwd, options = {}) {
 				queries++;
 				Object.assign(request, delivery);
 			}
+			if (name === "parley:pending-round:v1") Object.assign(request, parley);
 			bus.get(name)?.(request);
 		},
 	};
@@ -34,7 +37,12 @@ function fixture(cwd, options = {}) {
 		cwd,
 		model: { id: "model" },
 		getContextUsage: () => ({ percent: 12, tokens: 6000 }),
-		sessionManager: { getSessionFile: () => "/tmp/pi-slim-test-session.jsonl" },
+		isIdle: () => true,
+		sessionManager: {
+			getSessionFile: () => "/tmp/pi-slim-test-session.jsonl",
+			getEntries: () => entries,
+			getEntry: (id) => entries.find(entry => entry.id === id),
+		},
 		ui: {
 			theme,
 			setWorkingVisible: (visible) => { workingVisible = visible; },
@@ -52,13 +60,15 @@ function fixture(cwd, options = {}) {
 	};
 	slim({
 		events: eventBus,
-		on: (event, handler) => events.set(event, handler),
+		on: (event, handler) => events.set(event, (data = {}, context = ctx) => handler(data, context)),
+		appendEntry: (customType, data) => entries.push({ type: "custom", customType, data, timestamp: new Date().toISOString() }),
 		registerCommand: (name, command) => commands.set(name, command),
 		getThinkingLevel: () => "off",
 	});
 	events.get("session_start")({}, ctx);
 	return {
-		get editor() { return editor; }, events, commands, ctx, terminal,
+		get editor() { return editor; }, events, commands, ctx, terminal, entries,
+		setParley(state) { parley = state; eventBus.emit("parley:pending-round-changed:v1", { version: 1 }); },
 		get workingVisible() { return workingVisible; }, get queries() { return queries; }, get renders() { return renders; },
 		setDelivery(state, notify = true) {
 			delivery = state;
@@ -86,7 +96,7 @@ test("streaming keeps the link separate from spinner and never intercepts input"
 	const f = fixture(`${process.env.HOME}/dev/project`);
 	const idleLink = [...f.editor.render(100)[0].matchAll(linkPattern)][0][0];
 	assert.equal(Object.getPrototypeOf(Object.getPrototypeOf(f.editor)), CustomEditor.prototype);
-	assert.deepEqual([...f.events.keys()], ["agent_start", "agent_end", "session_shutdown", "session_start"]);
+	assert.deepEqual([...f.events.keys()], ["agent_start", "agent_settled", "session_shutdown", "session_start"]);
 	f.events.get("agent_start")();
 	try {
 		const border = f.editor.render(100)[0];
@@ -102,14 +112,14 @@ test("streaming keeps the link separate from spinner and never intercepts input"
 		assert.equal(f.terminal.rows, 40);
 		assert.equal(Object.hasOwn(f.terminal, "rows"), false);
 	} finally {
-		f.events.get("agent_end")();
+		f.events.get("agent_settled")();
 		await f.commands.get("slim").handler("", f.ctx);
 	}
 	assert.equal(f.editor, undefined);
 	assert.equal(f.workingVisible, true);
 });
 
-test("narrow borders drop whole path links without leakage or excess width", () => {
+test("narrow borders preserve path targets without link leakage or excess width", () => {
 	const f = fixture("/tmp/中文 long project");
 	for (let width = 3; width <= 90; width++) {
 		const border = f.editor.render(width)[0];
@@ -117,7 +127,10 @@ test("narrow borders drop whole path links without leakage or excess width", () 
 		const links = [...border.matchAll(linkPattern)];
 		assert.ok(links.length <= 1);
 		assert.equal(border.replace(linkPattern, "$2").includes("\x1b]8"), false);
-		if (links.length) assert.equal(links[0][2], f.ctx.cwd);
+		if (links.length) {
+			assert.ok(f.ctx.cwd.startsWith(links[0][2]));
+			assert.equal(decodeURIComponent(links[0][1].slice("pi-slim-copy:".length)), f.ctx.cwd);
+		}
 	}
 });
 
@@ -128,7 +141,7 @@ test("installed Kitty parses the rendered link without a window or clipboard acc
 	try {
 		border = f.editor.render(120)[0];
 	} finally {
-		f.events.get("agent_end")();
+		f.events.get("agent_settled")();
 	}
 	const result = spawnSync("kitty", ["+runpy", `
 import json, shlex, sys
@@ -225,7 +238,7 @@ test("pending state follows Inbox changes, not agent completion, without renderi
 	f.editor.render(100);
 	assert.equal(f.queries, queries);
 	f.events.get("agent_start")();
-	f.events.get("agent_end")();
+	f.events.get("agent_settled")();
 	f.editor.handleInput("\x1b\r");
 	assert.equal(calls[0].submitContext.afterResults.roundId, "round-1");
 	f.setDelivery({ ...state, deferredCount: 2 });
@@ -404,4 +417,73 @@ test("native submit contract smoke when the coordinated core build is available"
 	assert.notEqual(calls[0].options.submitContext.afterResults, state.pendingRound);
 	assert.equal(calls[0].options.submitContext, submittedContext);
 	assert.equal(f.editor.getText(), "");
+});
+
+const stoppedAt = new Date(2026, 8, 16, 14, 37).getTime();
+const stoppedEntry = () => ({ type: "custom", customType: "pi-slim.stopped", data: { at: stoppedAt } });
+const statusLine = (f, width = 150) => stripTerminalSequences(f.editor.render(width)[0]);
+
+test("last stopped time is local, restored, and unaffected by drafts or wake notifications", (t) => {
+	t.mock.timers.enable({ apis: ["Date"], now: stoppedAt + 60000 });
+	const f = fixture(process.cwd(), { entries: [stoppedEntry()] });
+	assert.ok(statusLine(f).includes("16 Sep 14:37"));
+	f.editor.handleInput("draft text");
+	f.setParley({ handled: true, pendingRound: pendingDelivery().pendingRound, peers: [] });
+	assert.ok(statusLine(f).includes("16 Sep 14:37 ───── waiting for wake"));
+	assert.equal(f.entries.length, 1);
+	f.events.get("agent_settled")();
+	assert.equal(f.entries.length, 1);
+	f.events.get("agent_start")();
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	assert.ok(statusLine(f).includes("16 Sep 14:37"));
+	t.mock.timers.tick(60000);
+	f.events.get("agent_settled")();
+	assert.ok(statusLine(f).includes("16 Sep 14:39 ───── waiting for wake"));
+	assert.equal(f.entries.length, 2);
+	const reopened = fixture(process.cwd(), { entries: f.entries });
+	assert.ok(statusLine(reopened).includes("16 Sep 14:39"));
+	assert.equal(f.entries.length, 2);
+});
+
+test("fresh panes do not invent a timestamp; persisted execution stops support older sessions", () => {
+	const fresh = fixture(process.cwd());
+	assert.equal(/\d{2} [A-Z][a-z]{2} \d{2}:\d{2}/.test(statusLine(fresh)), false);
+	assert.equal(fresh.entries.length, 0);
+	const restored = fixture(process.cwd(), { entries: [
+		{ type: "custom", customType: "pi.execution.v1", timestamp: new Date(stoppedAt).toISOString(), data: { kind: "execution", status: "suspended" } },
+		{ type: "message", timestamp: new Date(stoppedAt + 60000).toISOString(), message: { role: "user" } },
+	] });
+	assert.ok(statusLine(restored).includes("16 Sep 14:37"));
+	assert.equal(restored.entries.length, 2);
+});
+
+test("Parley labels use actual peer state and clear on cancellation, processing or unknown state", () => {
+	const f = fixture(process.cwd(), { entries: [stoppedEntry()] });
+	const round = pendingDelivery().pendingRound;
+	f.setParley({ handled: true, pendingRound: round, peers: [{ folder: "/home/sr/dev/pi/pi-notify" }, { folder: "/work/search", host: "laptop" }] });
+	assert.ok(statusLine(f).includes("16 Sep 14:37 ───── parley with pi-notify laptop:search"));
+	assert.equal(statusLine(f).includes("·"), false);
+	f.events.get("agent_start")();
+	assert.equal(statusLine(f).includes("parley with"), false);
+	f.events.get("agent_settled")();
+	assert.ok(statusLine(f).includes("parley with pi-notify laptop:search"));
+	f.setParley({ handled: true, pendingRound: round, peers: [] });
+	assert.ok(statusLine(f).includes("waiting for wake"));
+	f.setParley({ handled: true, pendingRound: null, peers: [] });
+	assert.equal(statusLine(f).includes("waiting"), false);
+	f.setParley(undefined);
+	assert.equal(statusLine(f).includes("parley with"), false);
+});
+
+test("timestamp and waiting status never add rows and narrow splits retain context/model", () => {
+	const f = fixture(process.cwd(), { entries: [stoppedEntry()] });
+	const normalHeight = f.editor.render(120).length;
+	f.setParley({ handled: true, pendingRound: pendingDelivery().pendingRound, peers: [{ folder: "/work/pi-notify" }] });
+	for (const width of [30, 50, 70, 120]) {
+		const lines = f.editor.render(width);
+		assert.equal(lines.length, normalHeight);
+		assert.ok(lines.every(line => visibleWidth(line) <= width));
+		assert.ok(stripTerminalSequences(lines[0]).includes("12% 6k model"));
+	}
+	assert.ok(statusLine(f, 70).includes("16 Sep 14:37"));
 });

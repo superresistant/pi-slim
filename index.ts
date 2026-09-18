@@ -1,6 +1,7 @@
 /* Based on examples/extensions/border-status-editor.ts */
 
 import { realpathSync } from "node:fs";
+import { basename } from "node:path";
 import {
 	CustomEditor,
 	type ExtensionAPI,
@@ -23,7 +24,7 @@ type DeliveryState = {
 	deferredCount?: number;
 };
 
-const SEP = " · ";
+const SEP = " ";
 
 /**
  * Render a horizontal rule with left/right segment lists inlaid into it.
@@ -35,20 +36,33 @@ function fitBorderSegmented(
 	rightSegs: string[],
 	width: number,
 	border: (text: string) => string,
+	activity: string[] = [],
 ): string {
 	if (width <= 0) return "";
 	if (width === 1) return border("─");
 
-	const corners = 2;
+	const corners = 0;
 	const minGap = 3;
 
 	const joinSegs = (segs: string[]): string => {
 		const present = segs.filter((s) => s.length > 0);
-		return present.length === 0 ? "" : ` ${present.join(SEP)} `;
+		return present.join(SEP);
 	};
 
 	const left = leftSegs.filter((s) => s.length > 0);
 	const right = rightSegs.filter((s) => s.length > 0);
+	let status = activity.filter(Boolean).join(" ───── ");
+	const available = width - visibleWidth(joinSegs(right)) - minGap;
+	if (visibleWidth(joinSegs(left)) + 1 + visibleWidth(status) > available) status = activity[0] ?? "";
+	if (status && visibleWidth(joinSegs(left)) + 1 + visibleWidth(status) > available) {
+		const pathWidth = available - visibleWidth(status) - 1;
+		if (pathWidth >= 8) left.splice(0, left.length, truncateToWidth(joinSegs(left), pathWidth));
+		else status = "";
+	}
+	if (status) left.push(status);
+	if (available >= 8 && visibleWidth(joinSegs(left)) > available) {
+		left.splice(0, left.length, truncateToWidth(joinSegs(left), available));
+	}
 
 	const fits = () =>
 		corners + visibleWidth(joinSegs(left)) + visibleWidth(joinSegs(right)) + minGap <= width;
@@ -74,7 +88,7 @@ function fitBorderSegmented(
 	}
 
 	const gap = Math.max(0, width - corners - visibleWidth(leftStr) - visibleWidth(rightStr));
-	return `${border("─")}${leftStr}${border("─".repeat(gap))}${rightStr}${border("─")}`;
+	return `${leftStr}${border("─".repeat(gap))}${rightStr}`;
 }
 
 function formatCwd(cwd: string): string {
@@ -94,6 +108,12 @@ function contextSegments(ctx: ExtensionContext): string[] {
 	return segs;
 }
 
+function formatStopped(at: number): string {
+	const date = new Date(at);
+	const month = date.toLocaleString("en-US", { month: "short" });
+	return `${String(date.getDate()).padStart(2, "0")} ${month} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
 	let isWorking = false;
@@ -102,6 +122,8 @@ export default function (pi: ExtensionAPI) {
 	let activeTui: TUI | undefined;
 	let activeContext: ExtensionContext | undefined;
 	let pendingRound: PendingRound | null = null;
+	let lastStopped: number | undefined;
+	let waitingReason = "";
 	let branchCache: string | undefined;
 	// Captured from inside the setFooter factory; lets the editor read extension statuses.
 	let footerDataRef:
@@ -139,11 +161,32 @@ export default function (pi: ExtensionAPI) {
 		activeTui?.requestRender();
 	}
 
+	function refreshWaiting() {
+		waitingReason = "";
+		try {
+			const session = activeContext?.sessionManager.getSessionFile();
+			if (session && activeContext) {
+				const request: { version: 1; handled: boolean; expected: Target; pendingRound?: PendingRound | null; peers?: { folder: string; host?: string }[] } = {
+					version: 1, handled: false, expected: { pid: process.pid, cwd: realpathSync(activeContext.cwd), session },
+				};
+				pi.events.emit("parley:pending-round:v1", request);
+				if (request.handled && request.pendingRound) {
+					const names = request.peers?.map(peer => `${peer.host ? `${peer.host}:` : ""}${basename(peer.folder)}`);
+					waitingReason = names?.length ? `parley with ${names.join(" ")}` : "waiting for wake";
+				}
+			}
+		} catch {
+			waitingReason = "";
+		}
+		activeTui?.requestRender();
+	}
+
 	pi.events.on("pi-handoff-queue:changed:v1", refreshPendingRound);
+	pi.events.on("parley:pending-round-changed:v1", refreshWaiting);
 
 	pi.on("agent_start", () => {
-		if (!enabled) return;
 		isWorking = true;
+		if (!enabled) return;
 		stopSpinner();
 		spinnerTimer = setInterval(() => {
 			spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
@@ -152,9 +195,16 @@ export default function (pi: ExtensionAPI) {
 		activeTui?.requestRender();
 	});
 
-	pi.on("agent_end", () => {
-		isWorking = false;
-		stopSpinner();
+	pi.on("agent_settled", (event, ctx) => {
+		if (isWorking) {
+			const entry = event.executionReceipt ? ctx.sessionManager.getEntry(event.executionReceipt.entryId) : undefined;
+			const at = entry ? Date.parse(entry.timestamp) : NaN;
+			lastStopped = Number.isFinite(at) ? at : Date.now();
+			pi.appendEntry("pi-slim.stopped", { at: lastStopped });
+		}
+		isWorking = !ctx.isIdle();
+		if (!isWorking) stopSpinner();
+		refreshWaiting();
 		activeTui?.requestRender();
 	});
 
@@ -164,13 +214,25 @@ export default function (pi: ExtensionAPI) {
 		footerDataRef = undefined;
 		activeContext = undefined;
 		pendingRound = null;
+		lastStopped = undefined;
+		waitingReason = "";
 		isWorking = false;
 	});
 
 	pi.on("session_start", (_event, ctx) => {
 		activeContext = ctx;
+		lastStopped = undefined;
+		for (const entry of ctx.sessionManager.getEntries()) {
+			if (entry.type !== "custom") continue;
+			const data = entry.data as { at?: number; kind?: string; status?: string } | undefined;
+			const at = entry.customType === "pi-slim.stopped" ? data?.at
+				: entry.customType === "pi.execution.v1" && data?.kind === "execution" &&
+					["completed", "failed", "aborted", "suspended"].includes(data.status ?? "") ? Date.parse(entry.timestamp) : undefined;
+			if (typeof at === "number" && Number.isFinite(at) && (lastStopped === undefined || at > lastStopped)) lastStopped = at;
+		}
 		refreshPendingRound();
-		isWorking = false;
+		refreshWaiting();
+		isWorking = !ctx.isIdle();
 		spinnerIndex = 0;
 		branchCache = undefined;
 		if (enabled) applySlim(ctx);
@@ -249,7 +311,10 @@ export default function (pi: ExtensionAPI) {
 				if (thinking !== "off") right.push(muted(thinking));
 
 				const borderColor = (text: string) => this.borderColor(text);
-				lines[0] = fitBorderSegmented(left, right, width, borderColor);
+				lines[0] = fitBorderSegmented(left, right, width, borderColor, [
+					lastStopped === undefined ? "" : formatStopped(lastStopped),
+					isWorking ? "" : waitingReason,
+				]);
 				// Drop the bottom border row — all status info lives on top now.
 				if (this.isShowingAutocomplete()) return lines;
 				return lines.slice(0, -1);
@@ -261,7 +326,6 @@ export default function (pi: ExtensionAPI) {
 
 	function clearSlim(ctx: ExtensionContext) {
 		stopSpinner();
-		isWorking = false;
 		ctx.ui.setWorkingVisible(true);
 		ctx.ui.setFooter(undefined);
 		ctx.ui.setEditorComponent(undefined);
