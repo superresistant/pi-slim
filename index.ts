@@ -17,7 +17,7 @@ type PendingRound = { origin: Target; taskId: string; executionId: string; round
 type WakeSnapshot = { owner: Target; known: boolean; pending: { run: string; mode: "observe" | "launch" }[] };
 type WakeAdapter = {
 	pendingWakes(owner: Target): Promise<WakeSnapshot>;
-	watchPendingWakes(callback: () => void): () => void;
+	watchPendingWakes(callback: () => void, owner: Target): () => void;
 	hasLivePendingWake(snapshot: WakeSnapshot): boolean;
 };
 type WakeScope = { owner: Target; adapter?: WakeAdapter; snapshot?: WakeSnapshot; dispose?: () => void; refreshing: boolean; dirty: boolean };
@@ -184,7 +184,7 @@ export default function (pi: ExtensionAPI) {
 		if (scope.refreshing) return;
 		scope.refreshing = true;
 		void (async () => {
-			while (wakeScope === scope && scope.dirty) {
+			for (let pass = 0; pass < 2 && wakeScope === scope && scope.dirty; pass++) {
 				scope.dirty = false;
 				let snapshot: WakeSnapshot | undefined;
 				try { snapshot = await scope.adapter!.pendingWakes(scope.owner); } catch { snapshot = undefined; }
@@ -196,7 +196,8 @@ export default function (pi: ExtensionAPI) {
 			}
 		})().finally(() => {
 			scope.refreshing = false;
-			if (wakeScope === scope && scope.dirty) refreshWakes(scope);
+			// A dirty trailing result stays hidden until a new lifecycle event.
+			scope.dirty = false;
 		});
 	}
 
@@ -214,7 +215,7 @@ export default function (pi: ExtensionAPI) {
 			if (wakeScope !== scope) return;
 			scope.adapter = adapter;
 			const current = scope;
-			scope.dispose = adapter.watchPendingWakes(() => refreshWakes(current));
+			scope.dispose = adapter.watchPendingWakes(() => refreshWakes(current), scope.owner);
 			refreshWakes(scope);
 		} catch {
 			if (wakeScope === scope) stopWakeStatus();
@@ -247,7 +248,11 @@ export default function (pi: ExtensionAPI) {
 		activeTui?.requestRender();
 	}
 
-	pi.events.on("pi-handoff-queue:changed:v1", refreshPendingRound);
+	pi.events.on("pi-handoff-queue:changed:v1", (event: unknown) => {
+		if ((event as { version?: number })?.version !== 1) return;
+		refreshPendingRound();
+		if (wakeScope) refreshWakes(wakeScope);
+	});
 	pi.events.on("parley:pending-round-changed:v1", refreshWaiting);
 
 	pi.on("agent_start", () => {
@@ -271,7 +276,6 @@ export default function (pi: ExtensionAPI) {
 		isWorking = !ctx.isIdle();
 		if (!isWorking) stopSpinner();
 		refreshWaiting();
-		if (wakeScope) refreshWakes(wakeScope);
 		activeTui?.requestRender();
 	});
 

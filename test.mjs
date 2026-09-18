@@ -10,11 +10,12 @@ import slim from "./index.ts";
 
 const wakeBackends = new Map();
 const wakeCallbacks = new Set();
+const wakeWatchOwners = new WeakMap();
 const wakeProofs = new WeakMap();
 const shutdowns = new Set();
 globalThis.__piSlimWakeFixture = {
 	pendingWakes: (owner) => wakeBackends.get(owner.session)?.query(owner) ?? Promise.resolve({ owner, known: false, pending: [] }),
-	watchPendingWakes(callback) { wakeCallbacks.add(callback); return () => wakeCallbacks.delete(callback); },
+	watchPendingWakes(callback, owner) { wakeWatchOwners.set(callback, owner); wakeCallbacks.add(callback); return () => wakeCallbacks.delete(callback); },
 	hasLivePendingWake(snapshot) { return wakeProofs.get(snapshot)?.() ?? false; },
 };
 const wakeModule = `const fixture = globalThis.__piSlimWakeFixture;
@@ -94,7 +95,7 @@ function fixture(cwd, options = {}) {
 	events.get("session_start")({}, ctx);
 	shutdowns.add(() => events.get("session_shutdown")());
 	return {
-		get editor() { return editor; }, events, commands, ctx, terminal, entries,
+		get editor() { return editor; }, events, commands, ctx, terminal, entries, eventBus,
 		setParley(state) { parley = state; eventBus.emit("parley:pending-round-changed:v1", { version: 1 }); },
 		get workingVisible() { return workingVisible; }, get queries() { return queries; }, get renders() { return renders; },
 		setDelivery(state, notify = true) {
@@ -515,7 +516,12 @@ test("timestamp and waiting status never add rows and narrow splits retain conte
 	assert.ok(statusLine(f, 70).includes("16 Sep 14:37"));
 });
 
-const invalidateWakes = () => { for (const callback of wakeCallbacks) callback(); };
+const invalidateWakes = (owner) => {
+	for (const callback of wakeCallbacks) {
+		const watched = wakeWatchOwners.get(callback);
+		if (!owner || (watched.pid === owner.pid && watched.cwd === owner.cwd && watched.session === owner.session)) callback();
+	}
+};
 async function helperFixture() {
 	const session = "/tmp/pi-slim-helper-fixture.jsonl";
 	const backend = {
@@ -539,6 +545,7 @@ async function helperFixture() {
 test("helper status is owner-scoped, idle-only, compact, and does not advance the timestamp", async () => {
 	const { f, backend } = await helperFixture();
 	assert.deepEqual(backend.owner, { pid: process.pid, cwd: process.cwd(), session: f.ctx.sessionManager.getSessionFile() });
+	assert.deepEqual(wakeWatchOwners.get([...wakeCallbacks][0]), backend.owner);
 	const rows = f.editor.render(150).length;
 	assert.ok(statusLine(f).includes("16 Sep 14:37 ───── waiting for wake"));
 	assert.equal(f.entries.length, 1);
@@ -615,6 +622,62 @@ test("helper invalidation bursts coalesce and never expose superseded query resu
 	queries[1].resolve({ owner: queries[1].owner, known: true, pending: [] });
 	await nextTurn();
 	assert.equal(statusLine(f).includes("waiting for wake"), false);
+});
+
+test("trailing invalidations cannot extend a burst beyond two helper queries", async () => {
+	const { f, backend } = await helperFixture();
+	const queries = [];
+	backend.query = owner => new Promise(resolve => queries.push({ owner, resolve }));
+	const result = query => {
+		const snapshot = { owner: query.owner, known: true, pending: [{ run: "ready", mode: "observe" }] };
+		wakeProofs.set(snapshot, () => true);
+		query.resolve(snapshot);
+	};
+	invalidateWakes(); invalidateWakes();
+	assert.equal(queries.length, 1);
+	result(queries[0]); await nextTurn();
+	assert.equal(queries.length, 2);
+	for (let i = 0; i < 100; i++) invalidateWakes();
+	result(queries[1]);
+	await nextTurn(); await nextTurn();
+	assert.equal(queries.length, 2);
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+	f.eventBus.emit("pi-handoff-queue:changed:v1", { version: 1 });
+	assert.equal(queries.length, 3);
+	result(queries[2]); await nextTurn();
+	assert.ok(statusLine(f).includes("waiting for wake"));
+	assert.equal(f.entries.length, 1);
+});
+
+test("query-induced invalidation cannot create a helper refresh loop", async () => {
+	const { f, backend } = await helperFixture();
+	let calls = 0;
+	backend.query = async owner => {
+		calls++;
+		invalidateWakes(owner);
+		const snapshot = { owner, known: true, pending: [{ run: "ready", mode: "observe" }] };
+		wakeProofs.set(snapshot, () => true);
+		return snapshot;
+	};
+	invalidateWakes();
+	await nextTurn(); await nextTurn();
+	assert.equal(calls, 2);
+	assert.equal(statusLine(f).includes("waiting for wake"), false);
+});
+
+test("only scoped helper or local Inbox lifecycle changes refresh helper state", async () => {
+	const { f, backend } = await helperFixture();
+	invalidateWakes({ ...backend.owner, session: "/other/session.jsonl" });
+	f.setParley({ handled: true, pendingRound: null, peers: [] });
+	f.events.get("agent_settled")();
+	f.eventBus.emit("pi-handoff-queue:changed:v1", { version: 2 });
+	f.editor.handleInput("draft");
+	statusLine(f);
+	await nextTurn();
+	assert.equal(backend.calls, 1);
+	f.eventBus.emit("pi-handoff-queue:changed:v1", { version: 1 });
+	await nextTurn();
+	assert.equal(backend.calls, 2);
 });
 
 test("session replacement discards late helper replies and disposes old lifecycle watchers", async () => {
