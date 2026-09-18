@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import childProcess, { spawn } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { once } from "node:events";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -19,34 +21,48 @@ async function until(check) {
 	assert.fail("isolated consumer did not observe lifecycle change");
 }
 
-test("installed slim consumes real helper adapter and CLI using isolated control, storage and Inbox", async (t) => {
+test("installed slim consumes local helper adapter using isolated Unix control, storage and Inbox", async (t) => {
 	const installed = join(homedir(), ".pi/agent/extensions/pi-slim.ts");
 	assert.equal(realpathSync(installed), realpathSync(fileURLToPath(new URL("./index.ts", import.meta.url))));
 	const folder = mkdtempSync(join(tmpdir(), "pi-slim-helper-integration-"));
 	const env = {
 		SUBAGENT_STATE_DIR: join(folder, "state"), PI_HANDOFF_INBOX_DB: join(folder, "inbox.sqlite"),
-		SUBAGENT_PI_CTL: join(folder, "ctl"), WAKE_FIXTURE: folder,
+		TMPDIR: folder, SUBAGENT_PI_CTL: join(folder, "no-shell-control"),
 	};
 	const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
 	Object.assign(process.env, env);
 	const events = new Map(), bus = new Map();
-	let inbox, supervisor;
+	let inbox, supervisor, control;
+	let pings = 0;
 	t.after(async () => {
 		events.get("session_shutdown")?.();
 		if (supervisor && supervisor.exitCode === null && supervisor.signalCode === null) {
 			const exit = once(supervisor, "exit"); supervisor.kill(); await exit;
 		}
+		if (control) await new Promise(resolve => control.close(resolve));
 		inbox?.close();
 		for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
 		rmSync(folder, { recursive: true, force: true });
 	});
 	mkdirSync(env.SUBAGENT_STATE_DIR);
-	writeFileSync(env.SUBAGENT_PI_CTL, '#!/usr/bin/env python3\nimport os,sys\nassert sys.argv[1]=="status"\nroot=os.environ["WAKE_FIXTURE"]\nwith open(root+"/queries", "a") as f:f.write("query\\n")\nprint(open(root+"/control.json").read())\n');
-	chmodSync(env.SUBAGENT_PI_CTL, 0o755);
 	const owner = { pid: process.pid, cwd: process.cwd(), session: join(folder, "fixture-session.jsonl") };
 	inbox = new Inbox(env.PI_HANDOFF_INBOX_DB);
 	inbox.register(owner);
-	save(join(folder, "control.json"), { ok: true, ...owner, inbox: { available: true, frozen: false, target: owner } });
+	const controlDir = join(folder, `pi-ctl-${process.getuid()}`);
+	mkdirSync(controlDir);
+	control = createServer(socket => {
+		let input = "";
+		socket.setEncoding("utf8");
+		socket.on("data", chunk => {
+			input += chunk;
+			if (!input.includes("\n")) return;
+			assert.equal(JSON.parse(input.trim()).cmd, "ping");
+			pings++;
+			socket.end(JSON.stringify({ ok: true, ...owner, inbox: { available: true, frozen: false, target: owner } }) + "\n");
+		});
+	});
+	control.listen(join(controlDir, `${owner.pid}.sock`));
+	await once(control, "listening");
 	supervisor = spawn("/bin/sleep", ["30"]);
 	const run = join(env.SUBAGENT_STATE_DIR, "runs", "a".repeat(32));
 	mkdirSync(run, { recursive: true });
@@ -72,6 +88,10 @@ test("installed slim consumes real helper adapter and CLI using isolated control
 			setEditorComponent: factory => { editor = factory?.(tui, theme, { matches: () => false }); },
 		},
 	};
+	const subprocesses = ["execFile", "execFileSync", "spawn", "spawnSync", "exec", "execSync", "fork"].map(name =>
+		t.mock.method(childProcess, name, () => { throw new Error("wake adapter subprocess forbidden in this fixture"); }));
+	syncBuiltinESMExports();
+	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
 	const { default: slim } = await import(pathToFileURL(installed).href);
 	slim({
 		events: { on: (name, fn) => bus.set(name, fn), emit: (name, data) => bus.get(name)?.(data) },
@@ -82,13 +102,22 @@ test("installed slim consumes real helper adapter and CLI using isolated control
 	events.get("session_start")();
 	const line = () => stripTerminalSequences(editor.render(150)[0]);
 	const waiting = () => line().includes("waiting for wake");
-	await until(waiting);
+	await until(() => {
+		assert.ok(subprocesses.every(fn => fn.mock.callCount() === 0), "adapter upgrade required: subprocess attempt");
+		return waiting();
+	});
 	assert.ok(line().includes("16 Sep 14:37 ───── waiting for wake"));
 	assert.equal(editor.render(150).length, 2);
-	const queryLog = () => readFileSync(join(folder, "queries"), "utf8");
-	const queries = queryLog();
+	const queries = pings;
+	assert.ok(queries > 0);
 	for (let i = 0; i < 10; i++) assert.equal(waiting(), true);
-	assert.equal(queryLog(), queries);
+	assert.equal(pings, queries);
+	const beforeUnrelated = renders;
+	for (let i = 0; i < 10; i++) inbox.register({ ...owner, session: join(folder, `unrelated-${i}.jsonl`) });
+	await delay(100);
+	assert.equal(pings, queries);
+	assert.equal(renders, beforeUnrelated);
+	assert.equal(waiting(), true);
 	editor.handleInput("draft");
 	assert.equal(entries.length, 1);
 	const beforeCancel = renders;
@@ -101,10 +130,11 @@ test("installed slim consumes real helper adapter and CLI using isolated control
 	await until(() => renders > beforeTerminal && !waiting());
 	save(join(run, "state.json"), { phase: "running", supervisorPid: supervisor.pid });
 	await until(waiting);
-	const beforeDeath = queryLog();
+	const beforeDeath = pings;
 	const exit = once(supervisor, "exit"); supervisor.kill("SIGKILL"); await exit;
 	assert.equal(waiting(), false);
-	assert.equal(queryLog(), beforeDeath);
+	assert.equal(pings, beforeDeath);
+	assert.ok(subprocesses.every(fn => fn.mock.callCount() === 0));
 	assert.equal(entries.length, 1);
 	assert.ok(line().includes("16 Sep 14:37"));
 	assert.equal(editor.render(150).length, 2);
