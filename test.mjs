@@ -56,7 +56,7 @@ function fixture(cwd, options = {}) {
 	};
 	const terminal = Object.create({ get rows() { return 40; } });
 	const tui = { terminal, requestRender() { renders++; } };
-	const theme = { borderColor: (text) => text, fg: (_color, text) => text };
+	const theme = options.theme ?? { borderColor: (text) => text, fg: (_color, text) => text };
 	let editor;
 	let workingVisible;
 	const ctx = {
@@ -501,6 +501,54 @@ test("Parley labels use actual peer state and clear on cancellation, processing 
 	assert.equal(statusLine(f).includes("waiting"), false);
 	f.setParley(undefined);
 	assert.equal(statusLine(f).includes("parley with"), false);
+});
+
+test("all status separator strokes stay muted regardless of thinking border color", (t) => {
+	const frames = [];
+	const theme = {
+		borderColor: text => `\x1b[35m${text}\x1b[39m`,
+		fg: (color, text) => `\x1b[${color === "muted" ? 90 : 36}m${text}\x1b[39m`,
+	};
+	const f = fixture(process.cwd(), { entries: [stoppedEntry()], theme });
+	for (const border of [37, 35]) {
+		f.editor.borderColor = text => `\x1b[${border}m${text}\x1b[39m`;
+		for (const round of [null, pendingDelivery().pendingRound]) {
+			f.setParley({ handled: true, pendingRound: round, peers: [{ folder: "/work/pi-notify" }] });
+			for (const width of [40, 150]) {
+				const lines = f.editor.render(width);
+				let color, strokes = 0;
+				for (const match of lines[0].matchAll(/\x1b\[(\d+)m|─/g)) {
+					if (match[1]) color = Number(match[1]);
+					else { assert.equal(color, 90); strokes++; }
+				}
+				assert.ok(strokes > 0);
+				assert.equal(visibleWidth(lines[0]), width);
+				assert.equal(lines.length, 2);
+				if (round && width === 150) {
+					assert.ok(lines[0].includes("\x1b[90m─────\x1b[39m"));
+					frames.push(lines[0]);
+				}
+			}
+		}
+	}
+	const result = spawnSync("kitty", ["+runpy", `
+import json, sys
+from kitty.fast_data_types import Screen
+for line in json.load(sys.stdin):
+    screen = Screen(None, 3, 200, 100)
+    data = (line + "\\r\\n\\x1b[90mR").encode("utf-8")
+    buffer = screen.test_create_write_buffer()
+    buffer[:len(data)] = data
+    screen.test_commit_write_buffer(buffer, data)
+    screen.test_parse_written_data()
+    expected = screen.line(1).cursor_from(0).fg
+    row = screen.line(0)
+    strokes = [i for i, char in enumerate(str(row)) if char == "─"]
+    assert strokes
+    assert all(row.cursor_from(i).fg == expected for i in strokes)
+`], { input: JSON.stringify(frames), encoding: "utf8" });
+	if (result.error?.code === "ENOENT") return t.skip("Kitty is not installed");
+	assert.equal(result.status, 0, result.stderr);
 });
 
 test("timestamp and waiting status never add rows and narrow splits retain context/model", () => {

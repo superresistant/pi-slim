@@ -59,7 +59,7 @@ function fitBorderSegmented(
 
 	const left = leftSegs.filter((s) => s.length > 0);
 	const right = rightSegs.filter((s) => s.length > 0);
-	let status = activity.filter(Boolean).join(" ───── ");
+	let status = activity.filter(Boolean).join(` ${border("─────")} `);
 	const available = width - visibleWidth(joinSegs(right)) - minGap;
 	if (visibleWidth(joinSegs(left)) + 1 + visibleWidth(status) > available) status = activity[0] ?? "";
 	if (status && visibleWidth(joinSegs(left)) + 1 + visibleWidth(status) > available) {
@@ -383,8 +383,7 @@ export default function (pi: ExtensionAPI) {
 				const thinking = pi.getThinkingLevel();
 				if (thinking !== "off") right.push(muted(thinking));
 
-				const borderColor = (text: string) => this.borderColor(text);
-				lines[0] = fitBorderSegmented(left, right, width, borderColor, [
+				lines[0] = fitBorderSegmented(left, right, width, muted, [
 					lastStopped === undefined ? "" : formatStopped(lastStopped),
 					isWorking ? "" : waitingReason || (helperIsWaiting() ? "waiting for wake" : ""),
 				]);
