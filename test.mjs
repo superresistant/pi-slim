@@ -8,6 +8,10 @@ import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { getOsc8LinkAtColumn, matchesKey, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import slim from "./index.ts";
 
+const cacheCalls = [];
+let cachePredict = () => ({ probability: null, samples: 0, account: "", lastRequestAt: null, reason: "empty" });
+globalThis.__piSlimCacheFixture = (options) => { cacheCalls.push(options); return cachePredict(options); };
+const cacheModule = `export const getCachePrediction = globalThis.__piSlimCacheFixture;`;
 const wakeBackends = new Map();
 const wakeCallbacks = new Set();
 const wakeWatchOwners = new WeakMap();
@@ -23,6 +27,9 @@ export const pendingWakes = fixture.pendingWakes;
 export const watchPendingWakes = fixture.watchPendingWakes;
 export const hasLivePendingWake = fixture.hasLivePendingWake;`;
 registerHooks({ resolve(specifier, context, nextResolve) {
+	if (specifier === "@earendil-works/pi-coding-agent" && context.parentURL?.endsWith("/pi-slim/index.ts")) {
+		return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(cacheModule)}` };
+	}
 	if (specifier.endsWith("/subagent/pending-wakes.ts")) return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(wakeModule)}` };
 	return nextResolve(specifier, context);
 } });
@@ -30,6 +37,8 @@ afterEach(() => {
 	for (const shutdown of shutdowns) shutdown();
 	shutdowns.clear();
 	wakeBackends.clear();
+	cacheCalls.length = 0;
+	cachePredict = () => ({ probability: null, samples: 0, account: "", lastRequestAt: null, reason: "empty" });
 });
 
 const linkPattern = /\x1b\]8;;(pi-slim-copy:[^\x1b]*)\x1b\\([^\x1b]*)\x1b\]8;;\x1b\\/g;
@@ -62,11 +71,13 @@ function fixture(cwd, options = {}) {
 	const ctx = {
 		cwd,
 		mode: options.mode ?? "tui",
-		model: { id: options.model ?? "model" },
+		model: { id: options.model ?? "model", provider: options.provider },
+		modelRegistry: options.accountLookup ? { getCodexAccountId: options.accountLookup } : {},
 		getContextUsage: () => ({ percent: 12, tokens: 6000 }),
 		isIdle: () => true,
 		sessionManager: {
 			getSessionFile: () => options.session ?? "/tmp/pi-slim-test-session.jsonl",
+			getSessionId: () => options.sessionId ?? "00000000-0000-4000-8000-000000000001",
 			getEntries: () => entries,
 			getEntry: (id) => entries.find(entry => entry.id === id),
 		},
@@ -124,7 +135,7 @@ test("streaming keeps the link separate from spinner and never intercepts input"
 	const f = fixture(`${process.env.HOME}/dev/project`);
 	const idleLink = [...f.editor.render(100)[0].matchAll(linkPattern)][0][0];
 	assert.equal(Object.getPrototypeOf(Object.getPrototypeOf(f.editor)), CustomEditor.prototype);
-	assert.deepEqual([...f.events.keys()], ["agent_start", "agent_settled", "session_shutdown", "session_start"]);
+	assert.deepEqual([...f.events.keys()], ["agent_start", "agent_settled", "model_select", "session_tree", "session_compact", "session_shutdown", "session_start"]);
 	f.events.get("agent_start")();
 	try {
 		const border = f.editor.render(100)[0];
@@ -498,6 +509,133 @@ test("native submit contract smoke when the coordinated core build is available"
 	assert.equal(f.editor.getText(), "");
 });
 
+async function waitForCache(f, label) {
+	for (let i = 0; i < 60 && !statusLine(f).includes(label); i++) await nextTurn();
+	assert.ok(statusLine(f).includes(label), statusLine(f));
+}
+
+test("Codex cache probability uses the selected account and no render probes", async () => {
+	let account = "login-A", lookups = 0;
+	const f = fixture(`${process.env.HOME}/dev/long-project/gpu-operations`, {
+		provider: "openai-codex", model: "gpt-6-sol", accountLookup: async () => { lookups++; return account; },
+	});
+	cachePredict = ({ accountId }) => ({ probability: accountId === "login-A" ? .94 : .31, samples: 7, account: accountId, lastRequestAt: Date.now(), reason: "warm" });
+	await waitForCache(f, "cache 94%");
+	assert.deepEqual(cacheCalls.at(-1), { sessionId: "00000000-0000-4000-8000-000000000001", model: "gpt-6-sol", accountId: "login-A" });
+	const initialLookups = lookups, initialProbes = cacheCalls.length;
+	for (let i = 0; i < 30; i++) f.editor.render(45);
+	assert.equal(lookups, initialLookups);
+	assert.equal(cacheCalls.length, initialProbes);
+	account = "login-B";
+	f.events.get("agent_settled")();
+	assert.equal(statusLine(f).includes("cache 94%"), false);
+	await waitForCache(f, "cache 31%");
+	assert.equal(cacheCalls.at(-1).accountId, "login-B");
+	for (const width of [36, 42, 120]) {
+		const line = f.editor.render(width)[0];
+		assert.equal(visibleWidth(line), width);
+		assert.equal(getOsc8LinkAtColumn(line, 0), `pi-slim-copy:${encodeURIComponent(f.ctx.cwd)}`);
+		assert.ok(stripTerminalSequences(line).includes("gpu-operations"));
+		assert.ok(stripTerminalSequences(line).includes("gpt-6-sol"));
+	}
+	assert.equal(statusLine(f, 36).includes("cache 31%"), false);
+	assert.ok(statusLine(f, 120).includes("cache 31%"));
+});
+
+test("tree and compaction invalidate the previous request seed until a later recorded request", async (t) => {
+	t.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 8, 23, 13, 0).getTime() });
+	let lastRequestAt = Date.now() - 1000;
+	const f = fixture(process.cwd(), { provider: "openai-codex", accountLookup: async () => "login-A" });
+	cachePredict = () => ({ probability: .94, samples: 40, account: "login-A", lastRequestAt, reason: "warm" });
+	await waitForCache(f, "cache 94%");
+	for (const event of ["session_tree", "session_compact"]) {
+		f.events.get(event)();
+		await nextTurn();
+		assert.ok(statusLine(f).includes("cache unavailable"));
+		assert.equal(statusLine(f).includes("cache 94%"), false);
+		f.events.get("agent_settled")();
+		await nextTurn();
+		assert.equal(statusLine(f).includes("cache 94%"), false);
+		t.mock.timers.tick(1000);
+		lastRequestAt = Date.now();
+		f.events.get("agent_settled")();
+		await waitForCache(f, "cache 94%");
+	}
+});
+
+test("session replacement switches prediction scope and disposes the previous timer", async (t) => {
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const options = { provider: "openai-codex", sessionId: "first-session", accountLookup: async () => "login-A" };
+	cachePredict = ({ sessionId }) => ({ probability: sessionId === "first-session" ? .94 : .52, samples: 30, account: "login-A", lastRequestAt: null, reason: "warm" });
+	const f = fixture(process.cwd(), options);
+	await waitForCache(f, "cache 94%");
+	options.sessionId = "second-session";
+	f.events.get("session_start")();
+	await waitForCache(f, "cache 52%");
+	assert.equal(cacheCalls.at(-1).sessionId, "second-session");
+	const before = cacheCalls.length;
+	t.mock.timers.tick(60_000);
+	await nextTurn();
+	assert.equal(cacheCalls.length, before + 1);
+	assert.equal(cacheCalls.at(-1).sessionId, "second-session");
+});
+
+test("unsupported credentials and models show unavailable without guessing an account", async () => {
+	const codex = fixture(process.cwd(), { provider: "openai-codex", accountLookup: async () => undefined });
+	await nextTurn();
+	assert.ok(statusLine(codex).includes("cache unavailable"));
+	assert.equal(cacheCalls.length, 0);
+	const oldSdk = fixture(process.cwd(), { provider: "openai-codex" });
+	assert.ok(statusLine(oldSdk).includes("cache unavailable"));
+	const sparse = fixture(process.cwd(), { provider: "openai-codex", accountLookup: async () => "login-C" });
+	await nextTurn();
+	assert.ok(statusLine(sparse).includes("cache unavailable"));
+	assert.equal(statusLine(sparse).includes("cache 0%"), false);
+	assert.equal(cacheCalls.at(-1).accountId, "login-C");
+	const beforeOther = cacheCalls.length;
+	const headless = fixture(process.cwd(), { mode: "print", provider: "openai-codex", accountLookup: () => { assert.fail("non-TUI account lookup"); } });
+	assert.equal(statusLine(headless).includes("cache"), false);
+	const other = fixture(process.cwd(), { provider: "anthropic", accountLookup: () => { assert.fail("unexpected account lookup"); } });
+	assert.equal(statusLine(other).includes("cache"), false);
+	assert.equal(cacheCalls.length, beforeOther);
+});
+
+test("cache lifecycle ignores stale account replies, changes model, polls at most once/minute and stops on shutdown", async (t) => {
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	let release;
+	let account = "login-A";
+	const f = fixture(process.cwd(), { provider: "openai-codex", model: "gpt-6-sol", accountLookup: () =>
+		account === "pending" ? new Promise(resolve => { release = resolve; }) : Promise.resolve(account),
+	});
+	cachePredict = ({ accountId }) => ({ probability: accountId === "login-A" ? .94 : .23, samples: 5, account: accountId, lastRequestAt: null, reason: "warm" });
+	await waitForCache(f, "cache 94%");
+	account = "pending";
+	f.events.get("model_select")();
+	assert.equal(statusLine(f).includes("cache 94%"), false);
+	account = "login-B";
+	f.ctx.model.id = "gpt-6-mini";
+	f.events.get("model_select")();
+	await waitForCache(f, "cache 23%");
+	release("login-A");
+	await nextTurn();
+	assert.equal(statusLine(f).includes("cache 94%"), false);
+	assert.equal(cacheCalls.at(-1).model, "gpt-6-mini");
+	const initial = cacheCalls.length;
+	account = "login-A";
+	t.mock.timers.tick(59_999);
+	await nextTurn();
+	assert.equal(cacheCalls.length, initial);
+	t.mock.timers.tick(1);
+	await waitForCache(f, "cache 94%");
+	assert.equal(cacheCalls.length, initial + 1);
+	assert.equal(cacheCalls.at(-1).accountId, "login-A");
+	f.events.get("session_shutdown")();
+	const stopped = cacheCalls.length;
+	t.mock.timers.tick(120_000);
+	await nextTurn();
+	assert.equal(cacheCalls.length, stopped);
+});
+
 const stoppedAt = new Date(2026, 8, 16, 14, 37).getTime();
 const stoppedEntry = () => ({ type: "custom", customType: "pi-slim.stopped", data: { at: stoppedAt } });
 const statusLine = (f, width = 150) => stripTerminalSequences(f.editor.render(width)[0]);
@@ -552,7 +690,7 @@ test("Parley labels use actual peer state and clear on cancellation, processing 
 	const round = pendingDelivery().pendingRound;
 	f.setParley({ handled: true, pendingRound: round, peers: [{ folder: "/home/sr/dev/pi/pi-notify" }, { folder: "/work/search", host: "laptop" }] });
 	assert.ok(statusLine(f).includes("16/09 14:37─────parley with pi-notify laptop:search"));
-	assert.match(statusLine(f), /16\/09 14:37─────parley with pi-notify laptop:search─+12%/);
+	assert.match(statusLine(f), /16\/09 14:37─────parley with pi-notify laptop:search─+(?:ctx )?12%/);
 	assert.equal(statusLine(f).includes("·"), false);
 	f.events.get("agent_start")();
 	assert.equal(statusLine(f).includes("parley with"), false);

@@ -33,6 +33,7 @@ type DeliveryState = {
 };
 
 type StatusSegment = { text: string; drop: number };
+type CachePrediction = { probability: number | null; samples: number; account: string; lastRequestAt: number | null; reason: string };
 
 function fitBorderSegmented(
 	left: (width: number) => string,
@@ -111,6 +112,10 @@ export default function (pi: ExtensionAPI) {
 	let lastStopped: number | undefined;
 	let waitingReason = "";
 	let wakeScope: WakeScope | undefined;
+	let cacheStatus = "";
+	let cacheTimer: ReturnType<typeof setInterval> | undefined;
+	let cacheGeneration = 0;
+	let cacheResetAt: number | undefined;
 	let branchCache: string | undefined;
 	// Captured from inside the setFooter factory; lets the editor read extension statuses.
 	let footerDataRef:
@@ -128,6 +133,47 @@ export default function (pi: ExtensionAPI) {
 			spinnerTimer = undefined;
 		}
 	};
+
+	function stopCacheStatus() {
+		cacheGeneration++;
+		if (cacheTimer) clearInterval(cacheTimer);
+		cacheTimer = undefined;
+		cacheStatus = "";
+		cacheResetAt = undefined;
+	}
+
+	async function refreshCacheStatus(ctx: ExtensionContext) {
+		const generation = ++cacheGeneration;
+		cacheStatus = ctx.mode === "tui" && ctx.model?.provider === "openai-codex" ? "cache unavailable" : "";
+		activeTui?.requestRender();
+		if (ctx.mode !== "tui" || !cacheStatus) return;
+		const model = ctx.model!.id;
+		try {
+			const getAccountId = (ctx.modelRegistry as typeof ctx.modelRegistry & {
+				getCodexAccountId?: () => Promise<string | undefined>;
+			}).getCodexAccountId;
+			if (!getAccountId) return;
+			const accountId = await getAccountId.call(ctx.modelRegistry);
+			if (generation !== cacheGeneration || !accountId) return;
+			const sdk = await import("@earendil-works/pi-coding-agent") as {
+				getCachePrediction?: (options: { sessionId: string; model: string; accountId: string }) => CachePrediction;
+			};
+			if (!sdk.getCachePrediction) return;
+			const prediction = sdk.getCachePrediction({ sessionId: ctx.sessionManager.getSessionId(), model, accountId });
+			if (generation !== cacheGeneration) return;
+			if (cacheResetAt !== undefined) {
+				if (prediction.lastRequestAt === null || prediction.lastRequestAt <= cacheResetAt) return;
+				cacheResetAt = undefined;
+			}
+			if (prediction.probability !== null && Number.isFinite(prediction.probability) &&
+				prediction.probability >= 0 && prediction.probability <= 1) {
+				cacheStatus = `cache ${Math.round(prediction.probability * 100)}%`;
+				activeTui?.requestRender();
+			}
+		} catch {
+			// An older SDK or unsupported credentials have no prediction.
+		}
+	}
 
 	function refreshPendingRound() {
 		pendingRound = null;
@@ -254,10 +300,20 @@ export default function (pi: ExtensionAPI) {
 		isWorking = !ctx.isIdle();
 		if (!isWorking) stopSpinner();
 		refreshWaiting();
+		void refreshCacheStatus(ctx);
 		activeTui?.requestRender();
 	});
 
+	pi.on("model_select", (_event, ctx) => { void refreshCacheStatus(ctx); });
+	const invalidateCacheSeed = (_event: unknown, ctx: ExtensionContext) => {
+		cacheResetAt = Date.now();
+		void refreshCacheStatus(ctx);
+	};
+	pi.on("session_tree", invalidateCacheSeed);
+	pi.on("session_compact", invalidateCacheSeed);
+
 	pi.on("session_shutdown", () => {
+		stopCacheStatus();
 		stopWakeStatus();
 		stopSpinner();
 		activeTui = undefined;
@@ -270,7 +326,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", (_event, ctx) => {
+		stopCacheStatus();
 		activeContext = ctx;
+		void refreshCacheStatus(ctx);
+		if (ctx.mode === "tui") {
+			cacheTimer = setInterval(() => { void refreshCacheStatus(ctx); }, 60_000);
+			cacheTimer.unref();
+		}
 		void startWakeStatus(ctx);
 		lastStopped = undefined;
 		for (const entry of ctx.sessionManager.getEntries()) {
@@ -356,6 +418,7 @@ export default function (pi: ExtensionAPI) {
 					right.push({ text: muted([...statuses.values()].join(" ")), drop: 2 });
 				}
 				for (const seg of contextSegments(ctx)) right.push({ text: muted(seg), drop: seg.includes("%") ? 3 : 1 });
+				if (cacheStatus) right.push({ text: muted(cacheStatus), drop: 2 });
 				right.push({ text: muted(ctx.model?.id ?? "no model"), drop: 4 });
 				const thinking = pi.getThinkingLevel();
 				if (thinking !== "off") right.push({ text: muted(thinking), drop: 0 });
