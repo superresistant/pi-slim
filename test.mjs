@@ -584,7 +584,10 @@ test("session replacement switches prediction scope and disposes the previous ti
 	await waitForCache(f, "c52%");
 	assert.equal(cacheCalls.at(-1).sessionId, "second-session");
 	const before = cacheCalls.length;
-	t.mock.timers.tick(60_000);
+	t.mock.timers.tick(299_999);
+	await nextTurn();
+	assert.equal(cacheCalls.length, before);
+	t.mock.timers.tick(1);
 	await nextTurn();
 	assert.equal(cacheCalls.length, before + 1);
 	assert.equal(cacheCalls.at(-1).sessionId, "second-session");
@@ -610,7 +613,7 @@ test("unsupported credentials and models show unavailable without guessing an ac
 	assert.equal(cacheCalls.length, beforeOther);
 });
 
-test("cache lifecycle ignores stale account replies, changes model, polls at most once/minute and stops on shutdown", async (t) => {
+test("cache lifecycle ignores stale account replies, changes model, polls every five minutes and stops on shutdown", async (t) => {
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	let release;
 	let account = "login-A";
@@ -632,7 +635,7 @@ test("cache lifecycle ignores stale account replies, changes model, polls at mos
 	assert.equal(cacheCalls.at(-1).model, "gpt-6-mini");
 	const initial = cacheCalls.length;
 	account = "login-A";
-	t.mock.timers.tick(59_999);
+	t.mock.timers.tick(299_999);
 	await nextTurn();
 	assert.equal(cacheCalls.length, initial);
 	t.mock.timers.tick(1);
@@ -641,7 +644,7 @@ test("cache lifecycle ignores stale account replies, changes model, polls at mos
 	assert.equal(cacheCalls.at(-1).accountId, "login-A");
 	f.events.get("session_shutdown")();
 	const stopped = cacheCalls.length;
-	t.mock.timers.tick(120_000);
+	t.mock.timers.tick(600_000);
 	await nextTurn();
 	assert.equal(cacheCalls.length, stopped);
 });

@@ -331,7 +331,7 @@ export default function (pi: ExtensionAPI) {
 		activeContext = ctx;
 		void refreshCacheStatus(ctx);
 		if (ctx.mode === "tui") {
-			cacheTimer = setInterval(() => { void refreshCacheStatus(ctx); }, 60_000);
+			cacheTimer = setInterval(() => { void refreshCacheStatus(ctx); }, 300_000);
 			cacheTimer.unref();
 		}
 		void startWakeStatus(ctx);
