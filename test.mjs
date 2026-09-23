@@ -180,7 +180,15 @@ test("narrow layout keeps the identifying tail, drops thinking then tokens, and 
 	assert.equal(statusLine(fixture(`${cwd}/`), 14), "gpu-operations");
 	assert.ok(statusLine(f, 120).includes("~/dev/vaiata-inference/agents/gpu-operations"));
 	assert.ok(statusLine(f, 120).includes("12% 6k gpt6sol high"));
-	assert.ok(statusLine(fixture(cwd, { model: "gpt-6-sol-mini" }), 120).includes("gpt-6-sol-mini"));
+	for (const [id, display] of [
+		["gpt-6-sol-mini", "gpt6solmini"],
+		["claude-opus-4-6", "claudeopus46"],
+		["model", "model"],
+	]) {
+		const modelFixture = fixture(cwd, { model: id });
+		assert.ok(statusLine(modelFixture, 120).includes(display));
+		assert.equal(modelFixture.ctx.model.id, id);
+	}
 	const contextPrefixWidth = statusLine(f, 120).includes("ctx ") ? 4 : 0;
 	assert.ok(statusLine(f, 40 + contextPrefixWidth).startsWith("…/gpu-operations"));
 	assert.ok(statusLine(f, 33 + contextPrefixWidth).includes("12% 6k gpt6sol"));

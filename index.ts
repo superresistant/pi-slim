@@ -420,7 +420,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				for (const seg of contextSegments(ctx)) right.push({ text: muted(seg), drop: seg.includes("%") ? 3 : 1 });
 				if (cacheStatus) right.push({ text: muted(cacheStatus), drop: 2 });
-				right.push({ text: muted(ctx.model?.id === "gpt-6-sol" ? "gpt6sol" : ctx.model?.id ?? "no model"), drop: 4 });
+				right.push({ text: muted(ctx.model?.id.replaceAll("-", "") ?? "no model"), drop: 4 });
 				const thinking = pi.getThinkingLevel();
 				if (thinking !== "off") right.push({ text: muted(thinking), drop: 0 });
 
