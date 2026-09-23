@@ -9,6 +9,7 @@ import {
 	type ExtensionContext,
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
+import * as piSdk from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -155,11 +156,11 @@ export default function (pi: ExtensionAPI) {
 			if (!getAccountId) return;
 			const accountId = await getAccountId.call(ctx.modelRegistry);
 			if (generation !== cacheGeneration || !accountId) return;
-			const sdk = await import("@earendil-works/pi-coding-agent") as {
+			const getCachePrediction = (piSdk as typeof piSdk & {
 				getCachePrediction?: (options: { sessionId: string; model: string; accountId: string }) => CachePrediction;
-			};
-			if (!sdk.getCachePrediction) return;
-			const prediction = sdk.getCachePrediction({ sessionId: ctx.sessionManager.getSessionId(), model, accountId });
+			}).getCachePrediction;
+			if (!getCachePrediction) return;
+			const prediction = getCachePrediction({ sessionId: ctx.sessionManager.getSessionId(), model, accountId });
 			if (generation !== cacheGeneration) return;
 			if (cacheResetAt !== undefined) {
 				if (prediction.lastRequestAt === null || prediction.lastRequestAt <= cacheResetAt) return;

@@ -6,12 +6,10 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { getOsc8LinkAtColumn, matchesKey, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import slim from "./index.ts";
 
 const cacheCalls = [];
 let cachePredict = () => ({ probability: null, samples: 0, account: "", lastRequestAt: null, reason: "empty" });
 globalThis.__piSlimCacheFixture = (options) => { cacheCalls.push(options); return cachePredict(options); };
-const cacheModule = `export const getCachePrediction = globalThis.__piSlimCacheFixture;`;
 const wakeBackends = new Map();
 const wakeCallbacks = new Set();
 const wakeWatchOwners = new WeakMap();
@@ -28,11 +26,14 @@ export const watchPendingWakes = fixture.watchPendingWakes;
 export const hasLivePendingWake = fixture.hasLivePendingWake;`;
 registerHooks({ resolve(specifier, context, nextResolve) {
 	if (specifier === "@earendil-works/pi-coding-agent" && context.parentURL?.endsWith("/pi-slim/index.ts")) {
-		return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(cacheModule)}` };
+		const sdk = nextResolve(specifier, context);
+		const source = `export * from ${JSON.stringify(sdk.url)}; export const getCachePrediction = globalThis.__piSlimCacheFixture;`;
+		return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(source)}` };
 	}
 	if (specifier.endsWith("/subagent/pending-wakes.ts")) return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(wakeModule)}` };
 	return nextResolve(specifier, context);
 } });
+const { default: slim } = await import("./index.ts");
 afterEach(() => {
 	for (const shutdown of shutdowns) shutdown();
 	shutdowns.clear();
