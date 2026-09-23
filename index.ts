@@ -145,7 +145,7 @@ export default function (pi: ExtensionAPI) {
 
 	async function refreshCacheStatus(ctx: ExtensionContext) {
 		const generation = ++cacheGeneration;
-		cacheStatus = ctx.mode === "tui" && ctx.model?.provider === "openai-codex" ? "cache unavailable" : "";
+		cacheStatus = ctx.mode === "tui" && ctx.model?.provider === "openai-codex" ? "c?" : "";
 		activeTui?.requestRender();
 		if (ctx.mode !== "tui" || !cacheStatus) return;
 		const model = ctx.model!.id;
@@ -168,7 +168,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (prediction.probability !== null && Number.isFinite(prediction.probability) &&
 				prediction.probability >= 0 && prediction.probability <= 1) {
-				cacheStatus = `cache ${Math.round(prediction.probability * 100)}%`;
+				cacheStatus = `c${Math.round(prediction.probability * 100)}%`;
 				activeTui?.requestRender();
 			}
 		} catch {
@@ -420,7 +420,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				for (const seg of contextSegments(ctx)) right.push({ text: muted(seg), drop: seg.includes("%") ? 3 : 1 });
 				if (cacheStatus) right.push({ text: muted(cacheStatus), drop: 2 });
-				right.push({ text: muted(ctx.model?.id ?? "no model"), drop: 4 });
+				right.push({ text: muted(ctx.model?.id === "gpt-6-sol" ? "gpt6sol" : ctx.model?.id ?? "no model"), drop: 4 });
 				const thinking = pi.getThinkingLevel();
 				if (thinking !== "off") right.push({ text: muted(thinking), drop: 0 });
 

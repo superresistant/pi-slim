@@ -199,7 +199,7 @@ with sqlite3.connect(path) as db:
         env = dict(os.environ, TERM="xterm-256color", PI_CODING_AGENT_DIR=str(agent), PI_REQUEST_DB=str(db_path),
                    PI_SKIP_VERSION_CHECK="1", SUBAGENT_STATE_DIR=str(root / "helpers"),
                    PI_HANDOFF_INBOX_DB=str(root / "inbox.sqlite"), TMPDIR=tmp)
-        for width, login in [(35, "A"), (120, "A"), (120, "B")]:
+        for width, login in [(27, "A"), (120, "A"), (120, "B")]:
             if login == "B":
                 claims["https://api.openai.com/auth"]["chatgpt_account_id"] = "fixture-codex-account-B"
                 token_b = "head." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=") + ".sig"
@@ -221,12 +221,12 @@ with sqlite3.connect(path) as db:
                         chunk = os.read(master, 65536)
                         data += chunk
                         if b"\x1b[6n" in chunk: os.write(master, b"\x1b[1;1R")
-                        if b"cache 94%" in data and login == "A" and width == 120: break
-                        if b"cache unavailable" in data and login == "B":
+                        if b"c94%" in data and login == "A" and width == 120: break
+                        if b"c?" in data and login == "B":
                             time.sleep(.15)
                             while select.select([master], [], [], 0)[0]: data += os.read(master, 65536)
                             break
-                        if b"gpu-operations" in data and b"gpt-6-sol" in data and width == 35:
+                        if b"gpu-operations" in data and b"gpt6sol" in data and width == 27:
                             time.sleep(.15)
                             while select.select([master], [], [], 0)[0]: data += os.read(master, 65536)
                             break
@@ -240,12 +240,12 @@ with sqlite3.connect(path) as db:
                 screen.test_commit_write_buffer(buffer, status_line)
                 screen.test_parse_written_data()
                 row = screen.line(0)
-                if "gpt-6-sol" not in str(row): raise RuntimeError((width, str(row), status_line))
+                if "gpt6sol" not in str(row): raise RuntimeError((width, str(row), status_line))
                 expected = width == 120 and login == "A"
-                if ("cache 94%" in str(row)) != expected: raise RuntimeError((login, width, str(row)))
-                if login == "B" and "cache unavailable" not in str(row): raise RuntimeError(str(row))
+                if ("c94%" in str(row)) != expected: raise RuntimeError((login, width, str(row)))
+                if login == "B" and "c?" not in str(row): raise RuntimeError(str(row))
                 if "gpu-operations" not in str(row) or not any(row.hyperlink_ids()): raise RuntimeError((width, login, str(row), row.hyperlink_ids(), status_line))
-                if expected and "cache unavailable" in str(row): raise RuntimeError(str(row))
+                if expected and "c?" in str(row): raise RuntimeError(str(row))
                 if "last active" in str(row): raise RuntimeError(str(row))
             finally:
                 proc.terminate()

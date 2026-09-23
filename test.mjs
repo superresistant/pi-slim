@@ -179,16 +179,17 @@ test("narrow layout keeps the identifying tail, drops thinking then tokens, and 
 	const f = fixture(cwd, { thinking: "high", model: "gpt-6-sol" });
 	assert.equal(statusLine(fixture(`${cwd}/`), 14), "gpu-operations");
 	assert.ok(statusLine(f, 120).includes("~/dev/vaiata-inference/agents/gpu-operations"));
-	assert.ok(statusLine(f, 120).includes("12% 6k gpt-6-sol high"));
+	assert.ok(statusLine(f, 120).includes("12% 6k gpt6sol high"));
+	assert.ok(statusLine(fixture(cwd, { model: "gpt-6-sol-mini" }), 120).includes("gpt-6-sol-mini"));
 	const contextPrefixWidth = statusLine(f, 120).includes("ctx ") ? 4 : 0;
 	assert.ok(statusLine(f, 40 + contextPrefixWidth).startsWith("…/gpu-operations"));
-	assert.ok(statusLine(f, 36 + contextPrefixWidth).includes("12% 6k gpt-6-sol"));
-	assert.equal(statusLine(f, 36 + contextPrefixWidth).includes("high"), false);
-	assert.ok(statusLine(f, 30 + contextPrefixWidth).includes("gpu-operations"));
-	assert.ok(statusLine(f, 30 + contextPrefixWidth).includes("12% gpt-6-sol"));
-	assert.equal(statusLine(f, 30 + contextPrefixWidth).includes("6k"), false);
+	assert.ok(statusLine(f, 33 + contextPrefixWidth).includes("12% 6k gpt6sol"));
+	assert.equal(statusLine(f, 33 + contextPrefixWidth).includes("high"), false);
+	assert.ok(statusLine(f, 28 + contextPrefixWidth).includes("gpu-operations"));
+	assert.ok(statusLine(f, 28 + contextPrefixWidth).includes("12% gpt6sol"));
+	assert.equal(statusLine(f, 28 + contextPrefixWidth).includes("6k"), false);
 	assert.ok(statusLine(f, 26).includes("gpu-operations"));
-	assert.ok(statusLine(f, 26).includes("gpt-6-sol"));
+	assert.ok(statusLine(f, 26).includes("gpt6sol"));
 	assert.equal(statusLine(f, 26).includes("12%"), false);
 	assert.equal(statusLine(f, 14), "gpu-operations");
 	assert.equal(statusLine(f, 10), "gpu-opera…");
@@ -521,7 +522,7 @@ test("Codex cache probability uses the selected account and no render probes", a
 		provider: "openai-codex", model: "gpt-6-sol", accountLookup: async () => { lookups++; return account; },
 	});
 	cachePredict = ({ accountId }) => ({ probability: accountId === "login-A" ? .94 : .31, samples: 7, account: accountId, lastRequestAt: Date.now(), reason: "warm" });
-	await waitForCache(f, "cache 94%");
+	await waitForCache(f, "c94%");
 	assert.deepEqual(cacheCalls.at(-1), { sessionId: "00000000-0000-4000-8000-000000000001", model: "gpt-6-sol", accountId: "login-A" });
 	const initialLookups = lookups, initialProbes = cacheCalls.length;
 	for (let i = 0; i < 30; i++) f.editor.render(45);
@@ -529,18 +530,18 @@ test("Codex cache probability uses the selected account and no render probes", a
 	assert.equal(cacheCalls.length, initialProbes);
 	account = "login-B";
 	f.events.get("agent_settled")();
-	assert.equal(statusLine(f).includes("cache 94%"), false);
-	await waitForCache(f, "cache 31%");
+	assert.equal(statusLine(f).includes("c94%"), false);
+	await waitForCache(f, "c31%");
 	assert.equal(cacheCalls.at(-1).accountId, "login-B");
 	for (const width of [36, 42, 120]) {
 		const line = f.editor.render(width)[0];
 		assert.equal(visibleWidth(line), width);
 		assert.equal(getOsc8LinkAtColumn(line, 0), `pi-slim-copy:${encodeURIComponent(f.ctx.cwd)}`);
 		assert.ok(stripTerminalSequences(line).includes("gpu-operations"));
-		assert.ok(stripTerminalSequences(line).includes("gpt-6-sol"));
+		assert.ok(stripTerminalSequences(line).includes("gpt6sol"));
 	}
-	assert.equal(statusLine(f, 36).includes("cache 31%"), false);
-	assert.ok(statusLine(f, 120).includes("cache 31%"));
+	assert.equal(statusLine(f, 27).includes("c31%"), false);
+	assert.ok(statusLine(f, 120).includes("c31%"));
 });
 
 test("tree and compaction invalidate the previous request seed until a later recorded request", async (t) => {
@@ -548,19 +549,19 @@ test("tree and compaction invalidate the previous request seed until a later rec
 	let lastRequestAt = Date.now() - 1000;
 	const f = fixture(process.cwd(), { provider: "openai-codex", accountLookup: async () => "login-A" });
 	cachePredict = () => ({ probability: .94, samples: 40, account: "login-A", lastRequestAt, reason: "warm" });
-	await waitForCache(f, "cache 94%");
+	await waitForCache(f, "c94%");
 	for (const event of ["session_tree", "session_compact"]) {
 		f.events.get(event)();
 		await nextTurn();
-		assert.ok(statusLine(f).includes("cache unavailable"));
-		assert.equal(statusLine(f).includes("cache 94%"), false);
+		assert.ok(statusLine(f).includes("c?"));
+		assert.equal(statusLine(f).includes("c94%"), false);
 		f.events.get("agent_settled")();
 		await nextTurn();
-		assert.equal(statusLine(f).includes("cache 94%"), false);
+		assert.equal(statusLine(f).includes("c94%"), false);
 		t.mock.timers.tick(1000);
 		lastRequestAt = Date.now();
 		f.events.get("agent_settled")();
-		await waitForCache(f, "cache 94%");
+		await waitForCache(f, "c94%");
 	}
 });
 
@@ -569,10 +570,10 @@ test("session replacement switches prediction scope and disposes the previous ti
 	const options = { provider: "openai-codex", sessionId: "first-session", accountLookup: async () => "login-A" };
 	cachePredict = ({ sessionId }) => ({ probability: sessionId === "first-session" ? .94 : .52, samples: 30, account: "login-A", lastRequestAt: null, reason: "warm" });
 	const f = fixture(process.cwd(), options);
-	await waitForCache(f, "cache 94%");
+	await waitForCache(f, "c94%");
 	options.sessionId = "second-session";
 	f.events.get("session_start")();
-	await waitForCache(f, "cache 52%");
+	await waitForCache(f, "c52%");
 	assert.equal(cacheCalls.at(-1).sessionId, "second-session");
 	const before = cacheCalls.length;
 	t.mock.timers.tick(60_000);
@@ -584,20 +585,20 @@ test("session replacement switches prediction scope and disposes the previous ti
 test("unsupported credentials and models show unavailable without guessing an account", async () => {
 	const codex = fixture(process.cwd(), { provider: "openai-codex", accountLookup: async () => undefined });
 	await nextTurn();
-	assert.ok(statusLine(codex).includes("cache unavailable"));
+	assert.ok(statusLine(codex).includes("c?"));
 	assert.equal(cacheCalls.length, 0);
 	const oldSdk = fixture(process.cwd(), { provider: "openai-codex" });
-	assert.ok(statusLine(oldSdk).includes("cache unavailable"));
+	assert.ok(statusLine(oldSdk).includes("c?"));
 	const sparse = fixture(process.cwd(), { provider: "openai-codex", accountLookup: async () => "login-C" });
 	await nextTurn();
-	assert.ok(statusLine(sparse).includes("cache unavailable"));
-	assert.equal(statusLine(sparse).includes("cache 0%"), false);
+	assert.ok(statusLine(sparse).includes("c?"));
+	assert.equal(statusLine(sparse).includes("c0%"), false);
 	assert.equal(cacheCalls.at(-1).accountId, "login-C");
 	const beforeOther = cacheCalls.length;
 	const headless = fixture(process.cwd(), { mode: "print", provider: "openai-codex", accountLookup: () => { assert.fail("non-TUI account lookup"); } });
-	assert.equal(statusLine(headless).includes("cache"), false);
+	assert.equal(statusLine(headless).includes("c?"), false);
 	const other = fixture(process.cwd(), { provider: "anthropic", accountLookup: () => { assert.fail("unexpected account lookup"); } });
-	assert.equal(statusLine(other).includes("cache"), false);
+	assert.equal(statusLine(other).includes("c?"), false);
 	assert.equal(cacheCalls.length, beforeOther);
 });
 
@@ -609,17 +610,17 @@ test("cache lifecycle ignores stale account replies, changes model, polls at mos
 		account === "pending" ? new Promise(resolve => { release = resolve; }) : Promise.resolve(account),
 	});
 	cachePredict = ({ accountId }) => ({ probability: accountId === "login-A" ? .94 : .23, samples: 5, account: accountId, lastRequestAt: null, reason: "warm" });
-	await waitForCache(f, "cache 94%");
+	await waitForCache(f, "c94%");
 	account = "pending";
 	f.events.get("model_select")();
-	assert.equal(statusLine(f).includes("cache 94%"), false);
+	assert.equal(statusLine(f).includes("c94%"), false);
 	account = "login-B";
 	f.ctx.model.id = "gpt-6-mini";
 	f.events.get("model_select")();
-	await waitForCache(f, "cache 23%");
+	await waitForCache(f, "c23%");
 	release("login-A");
 	await nextTurn();
-	assert.equal(statusLine(f).includes("cache 94%"), false);
+	assert.equal(statusLine(f).includes("c94%"), false);
 	assert.equal(cacheCalls.at(-1).model, "gpt-6-mini");
 	const initial = cacheCalls.length;
 	account = "login-A";
@@ -627,7 +628,7 @@ test("cache lifecycle ignores stale account replies, changes model, polls at mos
 	await nextTurn();
 	assert.equal(cacheCalls.length, initial);
 	t.mock.timers.tick(1);
-	await waitForCache(f, "cache 94%");
+	await waitForCache(f, "c94%");
 	assert.equal(cacheCalls.length, initial + 1);
 	assert.equal(cacheCalls.at(-1).accountId, "login-A");
 	f.events.get("session_shutdown")();
