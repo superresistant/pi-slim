@@ -110,7 +110,7 @@ test("installed slim consumes local helper adapter using isolated Unix control, 
 		assert.ok(subprocesses.every(fn => fn.mock.callCount() === 0), "adapter upgrade required: subprocess attempt");
 		return waiting();
 	});
-	assert.ok(line().includes("16 Sep 14:37 ───── waiting for wake"));
+	assert.ok(line().includes("16/09 14:37 ───── waiting for wake"));
 	assert.equal(editor.render(150).length, 2);
 	const queries = pings;
 	assert.ok(queries > 0);
@@ -140,6 +140,86 @@ test("installed slim consumes local helper adapter using isolated Unix control, 
 	assert.equal(pings, beforeDeath);
 	assert.ok(subprocesses.every(fn => fn.mock.callCount() === 0));
 	assert.equal(entries.length, 1);
-	assert.ok(line().includes("16 Sep 14:37"));
+	assert.ok(line().includes("16/09 14:37"));
 	assert.equal(editor.render(150).length, 2);
+});
+
+test("installed runtime fresh-starts an existing session in isolated narrow/wide PTYs", (t) => {
+	const result = childProcess.spawnSync("kitty", ["+runpy", String.raw`
+def main():
+    import fcntl, json, os, pathlib, pty, select, struct, subprocess, sys, tempfile, termios, time
+    from kitty.fast_data_types import Screen
+    from urllib.parse import unquote
+    payload = json.load(sys.stdin)
+    with tempfile.TemporaryDirectory(prefix="pi-slim-start-") as tmp:
+        root = pathlib.Path(tmp)
+        cwd = root / "long-parent-中文" / "gpu-operations"
+        cwd.mkdir(parents=True)
+        agent = root / "agent"
+        agent.mkdir()
+        (agent / "settings.json").write_text(json.dumps({"quietStartup": True}))
+        session = root / "session.jsonl"
+        stopped = int(time.mktime((2026, 9, 23, 9, 50, 0, 0, 0, -1))) * 1000
+        entries = [
+            {"type": "session", "version": 3, "id": "slim-smoke", "timestamp": "2026-09-23T07:50:00Z", "cwd": str(cwd)},
+            {"type": "custom", "id": "stopped", "parentId": None, "timestamp": "2026-09-23T07:50:00Z", "customType": "pi-slim.stopped", "data": {"at": stopped}},
+        ]
+        session.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+        env = dict(os.environ, TERM="xterm-256color", PI_CODING_AGENT_DIR=str(agent), PI_SKIP_VERSION_CHECK="1",
+                   SUBAGENT_STATE_DIR=str(root / "helpers"), PI_HANDOFF_INBOX_DB=str(root / "inbox.sqlite"), TMPDIR=tmp)
+        for width in [40, 120]:
+            master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 35, width, 0, 0))
+            proc = subprocess.Popen(["node", payload["cli"], "--no-extensions", "-e", payload["extension"],
+                                     "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files",
+                                     "--provider", "openai", "--model", "gpt-4o", "--session", str(session)],
+                                    cwd=cwd, env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+            os.close(slave)
+            data = b""
+            try:
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    if select.select([master], [], [], 0.1)[0]:
+                        chunk = os.read(master, 65536)
+                        data += chunk
+                        if b"\x1b[6n" in chunk:
+                            os.write(master, b"\x1b[1;1R")
+                        if b"23/09 9:50" in data and b"pi-slim-copy:" in data:
+                            break
+                    assert proc.poll() is None, data.decode(errors="replace")
+                assert b"23/09 9:50" in data and b"pi-slim-copy:" in data, data.decode(errors="replace")
+                screen = Screen(None, 35, width, 100)
+                buffer = screen.test_create_write_buffer()
+                buffer[:len(data)] = data
+                screen.test_commit_write_buffer(buffer, data)
+                screen.test_parse_written_data()
+                rows = [screen.line(i) for i in range(35)]
+                status = [row for row in rows if "23/09 9:50" in str(row)]
+                assert len(status) == 1, [str(row) for row in rows]
+                assert "gpu-operations" in str(status[0]), str(status[0])
+                assert "gpt-4o" in str(status[0]), str(status[0])
+                assert "…/gpu-operations" in str(status[0]) if width == 40 else "long-parent-中文/gpu-operations" in str(status[0])
+                assert any(status[0].hyperlink_ids())
+                links = list(screen.hyperlinks_as_set())
+                assert any(unquote(link[0].removeprefix(":pi-slim-copy:")) == str(cwd) for link in links)
+                assert not any(label in str(status[0]) for label in ["last active", "working", " Sep "])
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                os.close(master)
+        restored = [json.loads(line) for line in session.read_text().splitlines()]
+        assert [entry["data"]["at"] for entry in restored if entry.get("customType") == "pi-slim.stopped"] == [stopped]
+main()
+`], {
+		input: JSON.stringify({
+			cli: fileURLToPath(new URL("../pi-local-runtime/packages/coding-agent/dist/bundle/cli.js", import.meta.url)),
+			extension: join(homedir(), ".pi/agent/extensions/pi-slim.ts"),
+		}), encoding: "utf8", timeout: 45000,
+	});
+	if (result.error?.code === "ENOENT") return t.skip("Kitty is not installed");
+	assert.equal(result.status, 0, result.stderr || String(result.error));
 });

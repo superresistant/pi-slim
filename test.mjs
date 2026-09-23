@@ -62,7 +62,7 @@ function fixture(cwd, options = {}) {
 	const ctx = {
 		cwd,
 		mode: options.mode ?? "tui",
-		model: { id: "model" },
+		model: { id: options.model ?? "model" },
 		getContextUsage: () => ({ percent: 12, tokens: 6000 }),
 		isIdle: () => true,
 		sessionManager: {
@@ -90,7 +90,7 @@ function fixture(cwd, options = {}) {
 		on: (event, handler) => events.set(event, (data = {}, context = ctx) => handler(data, context)),
 		appendEntry: (customType, data) => entries.push({ type: "custom", customType, data, timestamp: new Date().toISOString() }),
 		registerCommand: (name, command) => commands.set(name, command),
-		getThinkingLevel: () => "off",
+		getThinkingLevel: () => options.thinking ?? "off",
 	});
 	events.get("session_start")({}, ctx);
 	shutdowns.add(() => events.get("session_shutdown")());
@@ -105,14 +105,14 @@ function fixture(cwd, options = {}) {
 	};
 }
 
-for (const cwd of [`${process.env.HOME}/dev/project`, "/tmp/é 中文 #?%/$x' project", "/"]) {
+for (const cwd of [process.env.HOME, `${process.env.HOME}/dev/project`, `${process.env.HOME}-other/project`, "/tmp/é 中文 #?%/$x' project", "/"]) {
 	test(`cwd hyperlink preserves display and absolute target: ${cwd}`, () => {
 		const f = fixture(cwd);
 		const border = f.editor.render(120)[0];
 		const [link] = [...border.matchAll(linkPattern)];
 		assert.ok(link);
 		assert.equal(decodeURIComponent(link[1].slice("pi-slim-copy:".length)), cwd);
-		const display = cwd.startsWith(process.env.HOME) ? `~${cwd.slice(process.env.HOME.length)}` : cwd;
+		const display = cwd === process.env.HOME || cwd.startsWith(`${process.env.HOME}/`) ? `~${cwd.slice(process.env.HOME.length)}` : cwd;
 		assert.equal(link[2], display);
 		assert.ok(stripTerminalSequences(border).includes(display));
 		assert.equal(stripTerminalSequences(border), border.replace(linkPattern, "$2"));
@@ -156,8 +156,59 @@ test("narrow borders preserve path targets without link leakage or excess width"
 		assert.ok(links.length <= 1);
 		assert.equal(border.replace(linkPattern, "$2").includes("\x1b]8"), false);
 		if (links.length) {
-			assert.ok(f.ctx.cwd.startsWith(links[0][2]));
+			assert.ok(links[0][2].length > 0);
 			assert.equal(decodeURIComponent(links[0][1].slice("pi-slim-copy:".length)), f.ctx.cwd);
+		}
+	}
+});
+
+test("narrow layout keeps the identifying tail, drops thinking then tokens, and only finally clips basename", () => {
+	const cwd = `${process.env.HOME}/dev/vaiata-inference/agents/gpu-operations`;
+	const f = fixture(cwd, { thinking: "high", model: "gpt-6-sol" });
+	assert.equal(statusLine(fixture(`${cwd}/`), 14), "gpu-operations");
+	assert.ok(statusLine(f, 120).includes("~/dev/vaiata-inference/agents/gpu-operations"));
+	assert.ok(statusLine(f, 120).includes("12% 6k gpt-6-sol high"));
+	const contextPrefixWidth = statusLine(f, 120).includes("ctx ") ? 4 : 0;
+	assert.ok(statusLine(f, 40 + contextPrefixWidth).startsWith("…/gpu-operations"));
+	assert.ok(statusLine(f, 36 + contextPrefixWidth).includes("12% 6k gpt-6-sol"));
+	assert.equal(statusLine(f, 36 + contextPrefixWidth).includes("high"), false);
+	assert.ok(statusLine(f, 30 + contextPrefixWidth).includes("gpu-operations"));
+	assert.ok(statusLine(f, 30 + contextPrefixWidth).includes("12% gpt-6-sol"));
+	assert.equal(statusLine(f, 30 + contextPrefixWidth).includes("6k"), false);
+	assert.ok(statusLine(f, 26).includes("gpu-operations"));
+	assert.ok(statusLine(f, 26).includes("gpt-6-sol"));
+	assert.equal(statusLine(f, 26).includes("12%"), false);
+	assert.equal(statusLine(f, 14), "gpu-operations");
+	assert.equal(statusLine(f, 10), "gpu-opera…");
+	for (const width of [10, 14, 26, 30, 36, 40, 120]) {
+		const row = f.editor.render(width)[0];
+		assert.equal(visibleWidth(row), width);
+		assert.equal(getOsc8LinkAtColumn(row, 0), `pi-slim-copy:${encodeURIComponent(cwd)}`);
+	}
+});
+
+test("Unicode/ANSI narrow and wide rows retain basename and close copy links before status", () => {
+	const theme = { borderColor: text => `\x1b[35m${text}\x1b[39m`, fg: (_color, text) => `\x1b[90m${text}\x1b[39m` };
+	for (const name of ["中文-gpu", "e\u0301quipe-🧑‍💻", "🚀-operations"]) {
+		const cwd = `/tmp/long-parent/another-parent/${name}`;
+		const f = fixture(cwd, { thinking: "high", theme });
+		for (const working of [false, true]) {
+			if (working) f.events.get("agent_start")();
+			for (let width = 2; width <= 120; width++) {
+				const lines = f.editor.render(width);
+				assert.equal(lines.length, 2);
+				assert.equal(visibleWidth(lines[0]), width);
+				const display = stripTerminalSequences(lines[0]);
+				if (width >= visibleWidth(name) + Number(working)) assert.ok(display.includes(name), `${width}: ${display}`);
+				for (let col = 0; col < width; col++) {
+					const link = getOsc8LinkAtColumn(lines[0], col);
+					if (link) assert.equal(link, `pi-slim-copy:${encodeURIComponent(cwd)}`);
+				}
+				const rule = display.indexOf("─");
+				if (rule >= 0) assert.equal(getOsc8LinkAtColumn(lines[0], visibleWidth(display.slice(0, rule))), undefined);
+				if (working) assert.equal(getOsc8LinkAtColumn(lines[0], 0), undefined);
+			}
+			if (working) f.events.get("agent_settled")();
 		}
 	}
 });
@@ -451,37 +502,48 @@ const stoppedAt = new Date(2026, 8, 16, 14, 37).getTime();
 const stoppedEntry = () => ({ type: "custom", customType: "pi-slim.stopped", data: { at: stoppedAt } });
 const statusLine = (f, width = 150) => stripTerminalSequences(f.editor.render(width)[0]);
 
+test("stopped time uses local DD/MM H:mm: padded day/month/minute, unpadded 24-hour hour", () => {
+	for (const [date, expected] of [
+		[new Date(2026, 8, 23, 9, 50), "23/09 9:50"],
+		[new Date(2026, 0, 2, 0, 5), "02/01 0:05"],
+		[new Date(2026, 10, 3, 23, 9), "03/11 23:09"],
+	]) {
+		const f = fixture(process.cwd(), { entries: [{ type: "custom", customType: "pi-slim.stopped", data: { at: date.getTime() } }] });
+		assert.ok(statusLine(f).includes(expected));
+	}
+});
+
 test("last stopped time is local, restored, and unaffected by drafts or wake notifications", (t) => {
 	t.mock.timers.enable({ apis: ["Date"], now: stoppedAt + 60000 });
 	const f = fixture(process.cwd(), { entries: [stoppedEntry()] });
-	assert.ok(statusLine(f).includes("16 Sep 14:37"));
+	assert.ok(statusLine(f).includes("16/09 14:37"));
 	f.editor.handleInput("draft text");
 	f.setParley({ handled: true, pendingRound: pendingDelivery().pendingRound, peers: [] });
-	assert.ok(statusLine(f).includes("16 Sep 14:37 ───── waiting for wake"));
+	assert.ok(statusLine(f).includes("16/09 14:37 ───── waiting for wake"));
 	assert.equal(f.entries.length, 1);
 	f.events.get("agent_settled")();
 	assert.equal(f.entries.length, 1);
 	f.events.get("agent_start")();
 	assert.equal(statusLine(f).includes("waiting for wake"), false);
-	assert.ok(statusLine(f).includes("16 Sep 14:37"));
+	assert.ok(statusLine(f).includes("16/09 14:37"));
 	t.mock.timers.tick(60000);
 	f.events.get("agent_settled")();
-	assert.ok(statusLine(f).includes("16 Sep 14:39 ───── waiting for wake"));
+	assert.ok(statusLine(f).includes("16/09 14:39 ───── waiting for wake"));
 	assert.equal(f.entries.length, 2);
 	const reopened = fixture(process.cwd(), { entries: f.entries });
-	assert.ok(statusLine(reopened).includes("16 Sep 14:39"));
+	assert.ok(statusLine(reopened).includes("16/09 14:39"));
 	assert.equal(f.entries.length, 2);
 });
 
 test("fresh panes do not invent a timestamp; persisted execution stops support older sessions", () => {
 	const fresh = fixture(process.cwd());
-	assert.equal(/\d{2} [A-Z][a-z]{2} \d{2}:\d{2}/.test(statusLine(fresh)), false);
+	assert.equal(/\d{2}\/\d{2} \d{1,2}:\d{2}/.test(statusLine(fresh)), false);
 	assert.equal(fresh.entries.length, 0);
 	const restored = fixture(process.cwd(), { entries: [
 		{ type: "custom", customType: "pi.execution.v1", timestamp: new Date(stoppedAt).toISOString(), data: { kind: "execution", status: "suspended" } },
 		{ type: "message", timestamp: new Date(stoppedAt + 60000).toISOString(), message: { role: "user" } },
 	] });
-	assert.ok(statusLine(restored).includes("16 Sep 14:37"));
+	assert.ok(statusLine(restored).includes("16/09 14:37"));
 	assert.equal(restored.entries.length, 2);
 });
 
@@ -489,7 +551,7 @@ test("Parley labels use actual peer state and clear on cancellation, processing 
 	const f = fixture(process.cwd(), { entries: [stoppedEntry()] });
 	const round = pendingDelivery().pendingRound;
 	f.setParley({ handled: true, pendingRound: round, peers: [{ folder: "/home/sr/dev/pi/pi-notify" }, { folder: "/work/search", host: "laptop" }] });
-	assert.ok(statusLine(f).includes("16 Sep 14:37 ───── parley with pi-notify laptop:search"));
+	assert.ok(statusLine(f).includes("16/09 14:37 ───── parley with pi-notify laptop:search"));
 	assert.equal(statusLine(f).includes("·"), false);
 	f.events.get("agent_start")();
 	assert.equal(statusLine(f).includes("parley with"), false);
@@ -551,7 +613,7 @@ for line in json.load(sys.stdin):
 	assert.equal(result.status, 0, result.stderr);
 });
 
-test("timestamp and waiting status never add rows and narrow splits retain context/model", () => {
+test("timestamp and waiting status never add rows and narrow splits retain folder/model", () => {
 	const f = fixture(process.cwd(), { entries: [stoppedEntry()] });
 	const normalHeight = f.editor.render(120).length;
 	f.setParley({ handled: true, pendingRound: pendingDelivery().pendingRound, peers: [{ folder: "/work/pi-notify" }] });
@@ -559,9 +621,10 @@ test("timestamp and waiting status never add rows and narrow splits retain conte
 		const lines = f.editor.render(width);
 		assert.equal(lines.length, normalHeight);
 		assert.ok(lines.every(line => visibleWidth(line) <= width));
-		assert.ok(stripTerminalSequences(lines[0]).includes("12% 6k model"));
+		assert.ok(stripTerminalSequences(lines[0]).includes("pi-slim"));
+		assert.ok(stripTerminalSequences(lines[0]).includes("model"));
 	}
-	assert.ok(statusLine(f, 70).includes("16 Sep 14:37"));
+	assert.ok(statusLine(f, 70).includes("16/09 14:37"));
 });
 
 const invalidateWakes = (owner) => {
@@ -595,10 +658,10 @@ test("helper status is owner-scoped, idle-only, compact, and does not advance th
 	assert.deepEqual(backend.owner, { pid: process.pid, cwd: process.cwd(), session: f.ctx.sessionManager.getSessionFile() });
 	assert.deepEqual(wakeWatchOwners.get([...wakeCallbacks][0]), backend.owner);
 	const rows = f.editor.render(150).length;
-	assert.ok(statusLine(f).includes("16 Sep 14:37 ───── waiting for wake"));
+	assert.ok(statusLine(f).includes("16/09 14:37 ───── waiting for wake"));
 	assert.equal(f.entries.length, 1);
 	f.editor.handleInput("draft");
-	assert.ok(statusLine(f).includes("16 Sep 14:37"));
+	assert.ok(statusLine(f).includes("16/09 14:37"));
 	const validations = backend.validations;
 	f.events.get("agent_start")();
 	assert.equal(statusLine(f).includes("waiting for wake"), false);

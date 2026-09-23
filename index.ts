@@ -10,7 +10,7 @@ import {
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type Target = { pid: number; cwd: string; session: string };
 type PendingRound = { origin: Target; taskId: string; executionId: string; roundId: string; aggregateId: string };
@@ -32,16 +32,12 @@ type DeliveryState = {
 	deferredCount?: number;
 };
 
-const SEP = " ";
+type StatusSegment = { text: string; drop: number };
 
-/**
- * Render a horizontal rule with left/right segment lists inlaid into it.
- * Whole segments are dropped from the trailing edge before character-level truncation kicks in,
- * so narrow terminals lose `thinking` before `model` before `ctx %`, never mid-word.
- */
 function fitBorderSegmented(
-	leftSegs: string[],
-	rightSegs: string[],
+	left: (width: number) => string,
+	minLeftWidth: number,
+	rightSegs: StatusSegment[],
 	width: number,
 	border: (text: string) => string,
 	activity: string[] = [],
@@ -49,59 +45,42 @@ function fitBorderSegmented(
 	if (width <= 0) return "";
 	if (width === 1) return border("─");
 
-	const corners = 0;
-	const minGap = 3;
-
-	const joinSegs = (segs: string[]): string => {
-		const present = segs.filter((s) => s.length > 0);
-		return present.join(SEP);
+	const minGap = Math.min(3, Math.max(0, width - minLeftWidth));
+	const right = rightSegs.filter((s) => s.text.length > 0);
+	const rightText = () => right.map((s) => s.text).join(" ");
+	let status = activity.filter(Boolean).join(` ${border("─────")} `);
+	const statusWidth = () => status ? visibleWidth(status) + 1 : 0;
+	const fits = () => minLeftWidth + statusWidth() + visibleWidth(rightText()) + minGap <= width;
+	const dropNext = () => {
+		const priority = Math.min(...right.map((s) => s.drop));
+		right.splice(right.findIndex((s) => s.drop === priority), 1);
 	};
 
-	const left = leftSegs.filter((s) => s.length > 0);
-	const right = rightSegs.filter((s) => s.length > 0);
-	let status = activity.filter(Boolean).join(` ${border("─────")} `);
-	const available = width - visibleWidth(joinSegs(right)) - minGap;
-	if (visibleWidth(joinSegs(left)) + 1 + visibleWidth(status) > available) status = activity[0] ?? "";
-	if (status && visibleWidth(joinSegs(left)) + 1 + visibleWidth(status) > available) {
-		const pathWidth = available - visibleWidth(status) - 1;
-		if (pathWidth >= 8) left.splice(0, left.length, truncateToWidth(joinSegs(left), pathWidth));
-		else status = "";
-	}
-	if (status) left.push(status);
-	if (available >= 8 && visibleWidth(joinSegs(left)) > available) {
-		left.splice(0, left.length, truncateToWidth(joinSegs(left), available));
-	}
+	if (!fits()) status = activity[0] ?? "";
+	// Thinking and token count yield before the folder or stopped time.
+	while (!fits() && right.some((s) => s.drop <= 1)) dropNext();
+	if (!fits()) status = "";
+	while (!fits() && right.length > 0) dropNext();
 
-	const fits = () =>
-		corners + visibleWidth(joinSegs(left)) + visibleWidth(joinSegs(right)) + minGap <= width;
-
-	while (!fits() && right.length > 0) right.pop();
-	while (!fits() && left.length > 0) left.pop();
-
-	let leftStr = joinSegs(left);
-	let rightStr = joinSegs(right);
-
-	// Character-level fallback if a single remaining segment is itself too wide.
-	while (
-		corners + visibleWidth(leftStr) + visibleWidth(rightStr) + minGap > width &&
-		visibleWidth(rightStr) > 0
-	) {
-		rightStr = truncateToWidth(rightStr, Math.max(0, visibleWidth(rightStr) - 1), "");
-	}
-	while (
-		corners + visibleWidth(leftStr) + visibleWidth(rightStr) + minGap > width &&
-		visibleWidth(leftStr) > 0
-	) {
-		leftStr = truncateToWidth(leftStr, Math.max(0, visibleWidth(leftStr) - 1), "");
-	}
-
-	const gap = Math.max(0, width - corners - visibleWidth(leftStr) - visibleWidth(rightStr));
+	const rightStr = rightText();
+	const pathWidth = Math.max(0, width - visibleWidth(rightStr) - statusWidth() - minGap);
+	const leftStr = left(pathWidth) + (status ? ` ${status}` : "");
+	const gap = Math.max(0, width - visibleWidth(leftStr) - visibleWidth(rightStr));
 	return `${leftStr}${border("─".repeat(gap))}${rightStr}`;
 }
 
-function formatCwd(cwd: string): string {
+function formatCwd(cwd: string, width: number): string {
+	if (width <= 0) return "";
 	const home = process.env.HOME;
-	const display = home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+	let display = home && (cwd === home || cwd.startsWith(`${home}/`)) ? `~${cwd.slice(home.length)}` : cwd;
+	if (visibleWidth(display) > width) {
+		const parts = display.replace(/\/+$/, "").split("/");
+		let tail = parts.pop() || "/";
+		while (parts.length > 0 && visibleWidth(`…/${parts.at(-1)}/${tail}`) <= width) {
+			tail = `${parts.pop()}/${tail}`;
+		}
+		display = visibleWidth(`…/${tail}`) <= width ? `…/${tail}` : stripTerminalSequences(truncateToWidth(tail, width, "…"));
+	}
 	return `\x1b]8;;pi-slim-copy:${encodeURIComponent(cwd)}\x1b\\${display}\x1b]8;;\x1b\\`;
 }
 
@@ -118,8 +97,7 @@ function contextSegments(ctx: ExtensionContext): string[] {
 
 function formatStopped(at: number): string {
 	const date = new Date(at);
-	const month = date.toLocaleString("en-US", { month: "short" });
-	return `${String(date.getDate()).padStart(2, "0")} ${month} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+	return `${String(date.getDate()).padStart(2, "0")}/${String(date.getMonth() + 1).padStart(2, "0")} ${date.getHours()}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -368,22 +346,21 @@ export default function (pi: ExtensionAPI) {
 				const muted = (s: string) => thm.fg("muted", s);
 				const accent = (s: string) => thm.fg("accent", s);
 
-				const left: string[] = [];
-				if (isWorking) left.push(accent(spinnerFrames[spinnerIndex]));
-				left.push(muted(formatCwd(ctx.cwd)));
-				if (branchCache) left.push(muted(`(${branchCache})`));
+				const spinner = isWorking ? accent(spinnerFrames[spinnerIndex]) : "";
+				const left = (budget: number) => spinner + muted(formatCwd(ctx.cwd, budget - visibleWidth(spinner)));
+				const minLeftWidth = visibleWidth(spinner) + visibleWidth(basename(ctx.cwd) || "/");
 
-				const right: string[] = [];
+				const right: StatusSegment[] = [];
 				const statuses = footerDataRef?.getExtensionStatuses();
 				if (statuses && statuses.size > 0) {
-					right.push(muted([...statuses.values()].join(" ")));
+					right.push({ text: muted([...statuses.values()].join(" ")), drop: 2 });
 				}
-				for (const seg of contextSegments(ctx)) right.push(muted(seg));
-				right.push(muted(ctx.model?.id ?? "no model"));
+				for (const seg of contextSegments(ctx)) right.push({ text: muted(seg), drop: seg.includes("%") ? 3 : 1 });
+				right.push({ text: muted(ctx.model?.id ?? "no model"), drop: 4 });
 				const thinking = pi.getThinkingLevel();
-				if (thinking !== "off") right.push(muted(thinking));
+				if (thinking !== "off") right.push({ text: muted(thinking), drop: 0 });
 
-				lines[0] = fitBorderSegmented(left, right, width, muted, [
+				lines[0] = fitBorderSegmented(left, minLeftWidth, right, width, muted, [
 					lastStopped === undefined ? "" : formatStopped(lastStopped),
 					isWorking ? "" : waitingReason || (helperIsWaiting() ? "waiting for wake" : ""),
 				]);
