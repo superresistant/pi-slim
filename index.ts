@@ -48,7 +48,7 @@ function fitBorderSegmented(
 	const minGap = Math.min(3, Math.max(0, width - minLeftWidth));
 	const right = rightSegs.filter((s) => s.text.length > 0);
 	const rightText = () => right.map((s) => s.text).join(" ");
-	let status = activity.filter(Boolean).join(` ${border("─────")} `);
+	let status = activity.filter(Boolean).join(border("─────"));
 	const statusWidth = () => status ? visibleWidth(status) + 1 : 0;
 	const fits = () => minLeftWidth + statusWidth() + visibleWidth(rightText()) + minGap <= width;
 	const dropNext = () => {

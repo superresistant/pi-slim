@@ -110,7 +110,7 @@ test("installed slim consumes local helper adapter using isolated Unix control, 
 		assert.ok(subprocesses.every(fn => fn.mock.callCount() === 0), "adapter upgrade required: subprocess attempt");
 		return waiting();
 	});
-	assert.ok(line().includes("16/09 14:37 ───── waiting for wake"));
+	assert.ok(line().includes("16/09 14:37─────waiting for wake"));
 	assert.equal(editor.render(150).length, 2);
 	const queries = pings;
 	assert.ok(queries > 0);

@@ -519,7 +519,7 @@ test("last stopped time is local, restored, and unaffected by drafts or wake not
 	assert.ok(statusLine(f).includes("16/09 14:37"));
 	f.editor.handleInput("draft text");
 	f.setParley({ handled: true, pendingRound: pendingDelivery().pendingRound, peers: [] });
-	assert.ok(statusLine(f).includes("16/09 14:37 ───── waiting for wake"));
+	assert.ok(statusLine(f).includes("16/09 14:37─────waiting for wake"));
 	assert.equal(f.entries.length, 1);
 	f.events.get("agent_settled")();
 	assert.equal(f.entries.length, 1);
@@ -528,7 +528,7 @@ test("last stopped time is local, restored, and unaffected by drafts or wake not
 	assert.ok(statusLine(f).includes("16/09 14:37"));
 	t.mock.timers.tick(60000);
 	f.events.get("agent_settled")();
-	assert.ok(statusLine(f).includes("16/09 14:39 ───── waiting for wake"));
+	assert.ok(statusLine(f).includes("16/09 14:39─────waiting for wake"));
 	assert.equal(f.entries.length, 2);
 	const reopened = fixture(process.cwd(), { entries: f.entries });
 	assert.ok(statusLine(reopened).includes("16/09 14:39"));
@@ -551,7 +551,8 @@ test("Parley labels use actual peer state and clear on cancellation, processing 
 	const f = fixture(process.cwd(), { entries: [stoppedEntry()] });
 	const round = pendingDelivery().pendingRound;
 	f.setParley({ handled: true, pendingRound: round, peers: [{ folder: "/home/sr/dev/pi/pi-notify" }, { folder: "/work/search", host: "laptop" }] });
-	assert.ok(statusLine(f).includes("16/09 14:37 ───── parley with pi-notify laptop:search"));
+	assert.ok(statusLine(f).includes("16/09 14:37─────parley with pi-notify laptop:search"));
+	assert.match(statusLine(f), /16\/09 14:37─────parley with pi-notify laptop:search─+12%/);
 	assert.equal(statusLine(f).includes("·"), false);
 	f.events.get("agent_start")();
 	assert.equal(statusLine(f).includes("parley with"), false);
@@ -658,7 +659,7 @@ test("helper status is owner-scoped, idle-only, compact, and does not advance th
 	assert.deepEqual(backend.owner, { pid: process.pid, cwd: process.cwd(), session: f.ctx.sessionManager.getSessionFile() });
 	assert.deepEqual(wakeWatchOwners.get([...wakeCallbacks][0]), backend.owner);
 	const rows = f.editor.render(150).length;
-	assert.ok(statusLine(f).includes("16/09 14:37 ───── waiting for wake"));
+	assert.ok(statusLine(f).includes("16/09 14:37─────waiting for wake"));
 	assert.equal(f.entries.length, 1);
 	f.editor.handleInput("draft");
 	assert.ok(statusLine(f).includes("16/09 14:37"));
