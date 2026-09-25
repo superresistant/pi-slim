@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { openNote } from './store.mjs';
 
-const runtime = process.env.PI_NOTES_RUNTIME || resolve(dirname(fileURLToPath(import.meta.url)), '../../pi-local');
+const runtime = process.env.PI_NOTES_RUNTIME || resolve(dirname(fileURLToPath(import.meta.url)), '../../pi-local-runtime');
 const load = relative => import(pathToFileURL(join(runtime, 'packages', relative)));
 const tui = await load('tui/dist/index.js');
 const { KeybindingsManager } = await load('coding-agent/dist/core/keybindings.js');

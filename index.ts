@@ -8,7 +8,6 @@ import {
 	type ExtensionContext,
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
-import * as piSdk from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -21,7 +20,6 @@ type BusState = {
 };
 
 type StatusSegment = { text: string; drop: number };
-type CachePrediction = { probability: number | null; samples: number; account: string; lastRequestAt: number | null; reason: string };
 
 function fitBorderSegmented(
 	left: (width: number) => string,
@@ -98,10 +96,6 @@ export default function (pi: ExtensionAPI) {
 	let activeContext: ExtensionContext | undefined;
 	let lastStopped: number | undefined;
 	let waitingReason = "";
-	let cacheStatus = "";
-	let cacheTimer: ReturnType<typeof setInterval> | undefined;
-	let cacheGeneration = 0;
-	let cacheResetAt: number | undefined;
 	let branchCache: string | undefined;
 	// Captured from inside the setFooter factory; lets the editor read extension statuses.
 	let footerDataRef:
@@ -119,47 +113,6 @@ export default function (pi: ExtensionAPI) {
 			spinnerTimer = undefined;
 		}
 	};
-
-	function stopCacheStatus() {
-		cacheGeneration++;
-		if (cacheTimer) clearInterval(cacheTimer);
-		cacheTimer = undefined;
-		cacheStatus = "";
-		cacheResetAt = undefined;
-	}
-
-	async function refreshCacheStatus(ctx: ExtensionContext) {
-		const generation = ++cacheGeneration;
-		cacheStatus = ctx.mode === "tui" && ctx.model?.provider === "openai-codex" ? "c?" : "";
-		activeTui?.requestRender();
-		if (ctx.mode !== "tui" || !cacheStatus) return;
-		const model = ctx.model!.id;
-		try {
-			const getAccountId = (ctx.modelRegistry as typeof ctx.modelRegistry & {
-				getCodexAccountId?: () => Promise<string | undefined>;
-			}).getCodexAccountId;
-			if (!getAccountId) return;
-			const accountId = await getAccountId.call(ctx.modelRegistry);
-			if (generation !== cacheGeneration || !accountId) return;
-			const getCachePrediction = (piSdk as typeof piSdk & {
-				getCachePrediction?: (options: { sessionId: string; model: string; accountId: string }) => CachePrediction;
-			}).getCachePrediction;
-			if (!getCachePrediction) return;
-			const prediction = getCachePrediction({ sessionId: ctx.sessionManager.getSessionId(), model, accountId });
-			if (generation !== cacheGeneration) return;
-			if (cacheResetAt !== undefined) {
-				if (prediction.lastRequestAt === null || prediction.lastRequestAt <= cacheResetAt) return;
-				cacheResetAt = undefined;
-			}
-			if (prediction.probability !== null && Number.isFinite(prediction.probability) &&
-				prediction.probability >= 0 && prediction.probability <= 1) {
-				cacheStatus = `c${Math.round(prediction.probability * 100)}%`;
-				activeTui?.requestRender();
-			}
-		} catch {
-			// An older SDK or unsupported credentials have no prediction.
-		}
-	}
 
 	pi.events.on("agent-bus:state:v1", (event: unknown) => {
 		const ctx = activeContext;
@@ -195,20 +148,10 @@ export default function (pi: ExtensionAPI) {
 		}
 		isWorking = !ctx.isIdle();
 		if (!isWorking) stopSpinner();
-		void refreshCacheStatus(ctx);
 		activeTui?.requestRender();
 	});
 
-	pi.on("model_select", (_event, ctx) => { void refreshCacheStatus(ctx); });
-	const invalidateCacheSeed = (_event: unknown, ctx: ExtensionContext) => {
-		cacheResetAt = Date.now();
-		void refreshCacheStatus(ctx);
-	};
-	pi.on("session_tree", invalidateCacheSeed);
-	pi.on("session_compact", invalidateCacheSeed);
-
 	pi.on("session_shutdown", () => {
-		stopCacheStatus();
 		stopSpinner();
 		activeTui = undefined;
 		footerDataRef = undefined;
@@ -219,13 +162,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", (_event, ctx) => {
-		stopCacheStatus();
 		activeContext = ctx;
-		void refreshCacheStatus(ctx);
-		if (ctx.mode === "tui") {
-			cacheTimer = setInterval(() => { void refreshCacheStatus(ctx); }, 300_000);
-			cacheTimer.unref();
-		}
 		lastStopped = undefined;
 		waitingReason = "";
 		for (const entry of ctx.sessionManager.getEntries()) {
@@ -285,7 +222,6 @@ export default function (pi: ExtensionAPI) {
 					right.push({ text: muted([...statuses.values()].join(" ")), drop: 2 });
 				}
 				for (const seg of contextSegments(ctx)) right.push({ text: muted(seg), drop: seg.includes("%") ? 3 : 1 });
-				if (cacheStatus) right.push({ text: muted(cacheStatus), drop: 2 });
 				right.push({ text: muted(ctx.model?.id.replaceAll("-", "") ?? "no model"), drop: 4 });
 				const thinking = pi.getThinkingLevel();
 				if (thinking !== "off") right.push({ text: muted(thinking), drop: 0 });
