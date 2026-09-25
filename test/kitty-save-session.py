@@ -3,13 +3,12 @@ import os
 from pathlib import Path
 import shlex
 import socket
-import sqlite3
 import subprocess
 import tempfile
 import unittest
 
 
-SAVER = Path.home() / ".local/bin/kitty-save-session"
+SAVER = Path(__file__).resolve().parents[1] / "bin/kitty-save-session"
 FLAG = "PI_HANDOFF_INBOX_ONBOARDING"
 ANCHOR_ENV = {
     "PI_ANCHOR_GUIDE": '{"pid":123,"cwd":"/guide cwd","session":"/guide session.jsonl"}',
@@ -44,13 +43,6 @@ class SaveSessionTest(unittest.TestCase):
         ]}]}]
         self.controls = {str(self.pid): {"pid": self.pid, "cwd": str(self.home), "session": str(self.session)}}
         self.serialized = 'kitty-unserialize-data=' + json.dumps({"id": 7})
-        self.policy = self.home / '.pi/agent/model-migrations.sqlite'
-        self.policy.parent.mkdir(parents=True)
-        with sqlite3.connect(self.policy) as conn:
-            conn.execute('CREATE TABLE pins (cwd TEXT PRIMARY KEY, model TEXT NOT NULL, thinking TEXT)')
-            conn.execute('CREATE TABLE migrations (id TEXT, from_model TEXT, to_model TEXT, mode TEXT, threshold REAL, state TEXT, created INTEGER)')
-            conn.execute('CREATE TABLE agents (session TEXT,cwd TEXT,pid INTEGER,model TEXT,thinking TEXT,model_entry TEXT,seen INTEGER,loaded INTEGER)')
-            conn.execute('CREATE TABLE decisions (migration TEXT,session TEXT,status TEXT,model_entry TEXT,reason TEXT,probability REAL,updated INTEGER)')
         binary = self.home / "bin"
         binary.mkdir()
         kitty = binary / "kitty"
@@ -80,7 +72,7 @@ class SaveSessionTest(unittest.TestCase):
         ctl.chmod(0o700)
         self.env = dict(os.environ, HOME=str(self.home),
                         PATH=f"{binary}:{os.environ['PATH']}",
-                        KITTY_LISTEN_ON="unix:/test-kitty", PI_MODEL_MIGRATION_DB=str(self.policy),
+                        KITTY_LISTEN_ON="unix:/test-kitty",
                         SAVE_FIXTURE=str(self.fixture), SAVE_STATE=str(self.home / 'live.json'),
                         SAVE_CONTROLS=str(self.home / 'controls.json'), **{FLAG: "1", **ANCHOR_ENV})
 
@@ -264,73 +256,26 @@ class SaveSessionTest(unittest.TestCase):
         self.assertIs(restored['pairs']['horizontal'], False)
         self.assertIs(restored['maximized'][0]['is_horizontal'], False)
 
-    def test_policy_pin_replaces_stale_handoff_env_only_for_verified_identity(self):
-        with sqlite3.connect(self.policy) as conn:
-            conn.execute('INSERT INTO pins VALUES (?,?,?)',
-                         ('/home/sr/dev/pi/mail-router', 'openai-codex/gpt-6-luna', 'high'))
-        old = 'openai-codex/gpt-5.6-luna'
-        new = 'openai-codex/gpt-6-luna'
-        keys = ('HANDOFF_CHAIN_MODEL', 'HANDOFF_PI_MODEL')
-        self.live[0]['tabs'][0]['windows'][0]['foreground_processes'][0]['cwd'] = '/home/sr/dev/pi/mail-router'
-        self.controls[str(self.pid)]['cwd'] = '/home/sr/dev/pi/mail-router'
-        original = launch(self.serialized, *(f'--env={key}={old}' for key in keys),
-                          '--env=OTHER=unchanged', '/usr/bin/pi', '--session', str(self.session)) + '\n'
-        expected = ['launch', self.serialized, *(f'--env={key}={new}' for key in keys),
-                    '--env=OTHER=unchanged', '/usr/bin/pi', '--session', str(self.session)]
-        self.assertEqual(shlex.split(self.save(original)), expected)
-        self.assertEqual(shlex.split(self.save(original)), expected)
+    def test_bus_and_legacy_handoff_env_stripped_without_policy_database(self):
+        stale = ('PI_BUS_HANDOFF=old-turn', 'PI_BUS_CWD=/wrong/folder',
+                 'PI_BUS_SESSION=/wrong/session.jsonl', 'HANDOFF_PI_MODEL=old/model',
+                 'HANDOFF_CHAIN_MODEL=old/model')
+        text = 'set_layout_state {"pairs": {"one": 7}}\n' + launch(
+            self.serialized, *(f'--env={item}' for item in stale), '--env=OTHER=keep',
+            '/usr/bin/pi', '--session', str(self.session)) + '\n'
+        result = self.save(text)
+        self.assertEqual(result.splitlines()[0], text.splitlines()[0])
+        self.assertEqual(shlex.split(result.splitlines()[1]), ['launch', self.serialized,
+                         '--env=OTHER=keep', '/usr/bin/pi', '--session', str(self.session)])
+        self.assertEqual(self.save(text), result)
         self.assertEqual(self.session.read_text(), '{"type":"session","id":"exact-session"}\n')
-        for missing in ([], [f'--env={keys[0]}={old}']):
-            with self.subTest(missing=missing):
-                text = launch(self.serialized, *missing, '/usr/bin/pi') + '\n'
-                saved = shlex.split(self.save(text))
-                self.assertEqual([t for t in saved if t.startswith('--env=HANDOFF_')],
-                                 [f'--env={key}={new}' for key in keys])
-        self.controls[str(self.pid)]['cwd'] = str(self.home)
-        self.live[0]['tabs'][0]['windows'][0]['foreground_processes'][0]['cwd'] = str(self.home)
-        self.assertEqual(shlex.split(self.save(original)), ['launch', self.serialized,
-                         '--env=OTHER=unchanged', '/usr/bin/pi', '--session', str(self.session)])
-        self.controls[str(self.pid)]['cwd'] = '/home/sr/dev/pi/mail-router'
-        self.live[0]['tabs'][0]['windows'][0]['foreground_processes'][0]['cwd'] = '/home/sr/dev/pi/mail-router'
-        self.controls[str(self.pid)]['pid'] += 1
-        self.assertEqual(shlex.split(self.save(original)), shlex.split(original))
 
-    def test_policy_model_reference_may_contain_nested_slashes(self):
-        with sqlite3.connect(self.policy) as conn:
-            conn.execute('INSERT INTO pins VALUES (?,?,?)',
-                         (str(self.home), 'openrouter/vendor/gpt-6-sol', 'high'))
-        old = launch(self.serialized, '--env=HANDOFF_PI_MODEL=old/old',
-                     '/usr/bin/pi', '--session', str(self.session)) + '\n'
-        saved = shlex.split(self.save(old))
-        for key in ('HANDOFF_CHAIN_MODEL', 'HANDOFF_PI_MODEL'):
-            self.assertIn(f'--env={key}=openrouter/vendor/gpt-6-sol', saved)
-        self.assertEqual(saved[-3:], ['/usr/bin/pi', '--session', str(self.session)])
-
-    def test_unpinned_policy_drops_stale_handoff_env_but_keeps_native_session(self):
+    def test_legacy_handoff_env_dropped_but_native_session_kept(self):
         old = launch(self.serialized, '--env=HANDOFF_CHAIN_MODEL=openai-codex/gpt-6-astra',
                      '--env=HANDOFF_PI_MODEL=openai-codex/gpt-6-astra', '--env=OTHER=keep',
                      '/usr/bin/pi', '--session', str(self.session)) + '\n'
         self.assertEqual(shlex.split(self.save(old)), ['launch', self.serialized,
                          '--env=OTHER=keep', '/usr/bin/pi', '--session', str(self.session)])
-
-    def test_unavailable_or_bad_policy_never_overwrites_last_good_save(self):
-        old = launch(self.serialized, '/usr/bin/pi', '--session', str(self.session)) + '\n'
-        self.save(old)
-        before = self.saved.read_bytes()
-        for broken in ('missing', 'schema'):
-            with self.subTest(broken=broken):
-                if broken == 'missing':
-                    self.policy.unlink()
-                else:
-                    with sqlite3.connect(self.policy) as conn:
-                        conn.execute('DROP TABLE pins')
-                self.fixture.write_text(launch(self.serialized, '/bin/false') + '\n')
-                subprocess.run([str(SAVER), '--auto'], env=self.env, capture_output=True,
-                               text=True, check=True, timeout=10)
-                self.assertEqual(self.saved.read_bytes(), before)
-                if broken == 'missing':
-                    with sqlite3.connect(self.policy) as conn:
-                        conn.execute('CREATE TABLE pins (cwd TEXT PRIMARY KEY, model TEXT NOT NULL, thinking TEXT)')
 
     def test_verified_resume_never_pins_launch_model(self):
         for model in (['--model', 'openai-codex/gpt-6-astra'],

@@ -7,7 +7,7 @@ import tempfile
 import time
 
 
-SAVER = Path.home() / '.local/bin/kitty-save-session'
+SAVER = Path(__file__).resolve().parents[1] / 'bin/kitty-save-session'
 CONFIG = Path.home() / '.config/kitty/kitty.conf'
 
 

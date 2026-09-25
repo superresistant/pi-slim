@@ -18,9 +18,8 @@ local dispatcher, which uses `notify-send` without touching TUI stdout.
   assistant text normalized to one line and capped at 240 Unicode characters.
   Markdown/control syntax is stripped; errors and empty responses have safe
   fallbacks.
-- Handoff-flow turns never notify. Old-Pi drain/launch state and exact Step 0–3
-  `HANDOFF-FLOW-OLD/NEW` markers cover both sides of the transfer; ordinary
-  post-handoff work resumes notifications.
+- Agent-bus handoff steps (`bus-handoff` and delivered `bus` messages with
+  `details.kind=handoff`) never notify; ordinary successor work and bus results do.
 - Every desktop event is handed to detached `notify.py`, the notification-side
   dispatcher. It maps `KITTY_WINDOW_ID` to the stable Kitty tab ID and checks a
   mute marker under `$XDG_RUNTIME_DIR/pi-notify-muted-tabs/` before invoking
@@ -46,5 +45,7 @@ Add this directory to `packages` in `~/.pi/agent/settings.json`:
 "/home/sr/dev/pi/pi-notify"
 ```
 
-Restart or reload Pi for extension changes. Reload `kitty.conf` once to install
-the shortcut; no full Kitty restart is required.
+Restart or reload Pi for extension changes. Install `bin/kitty-save-session`
+as `~/.local/bin/kitty-save-session` at agent-bus cutover to strip transient
+bus env from restored panes. Reload `kitty.conf` once to install the shortcut;
+no full Kitty restart is required.

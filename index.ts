@@ -86,23 +86,12 @@ function notificationTitle(): string {
 
 function isHandoffTurn(messages: unknown[]): boolean {
 	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i] as { role?: unknown; content?: unknown };
-		if (message?.role !== "user") continue;
-		const text = typeof message.content === "string"
-			? message.content
-			: Array.isArray(message.content)
-				? message.content
-						.filter(
-							(part): part is { type: "text"; text: string } =>
-								typeof part === "object" &&
-								part !== null &&
-								(part as { type?: unknown }).type === "text" &&
-								typeof (part as { text?: unknown }).text === "string",
-						)
-						.map((part) => part.text)
-						.join(" ")
-				: "";
-		return /\[HANDOFF-FLOW-(?:OLD|NEW)-/.test(text);
+		const message = messages[i] as { role?: unknown; customType?: unknown; details?: { kind?: unknown } };
+		if (message?.role === "custom") {
+			if (message.customType === "bus-handoff" || message.customType === "bus")
+				return message.customType === "bus-handoff" || message.details?.kind === "handoff";
+		}
+		if (message?.role === "user") return false;
 	}
 	return false;
 }
@@ -142,18 +131,6 @@ function parleyCompletionText(receipt: { taskId: string; executionId: string; in
 	}
 }
 
-function isExpectedCancellation(event: { aborted?: unknown; messages: unknown[] }): boolean {
-	if (event.aborted === true) return true;
-	if (event.aborted === false) return false;
-	for (let i = event.messages.length - 1; i >= 0; i--) {
-		const message = event.messages[i] as { role?: unknown; stopReason?: unknown; errorMessage?: unknown };
-		if (message?.role !== "assistant") continue;
-		return message.stopReason === "aborted" ||
-			(message.stopReason === "error" && message.errorMessage === "This operation was aborted");
-	}
-	return false;
-}
-
 function notificationNeedsAttention(event: { aborted?: unknown; messages: unknown[] }): boolean {
 	if (event.aborted === true) return true;
 	for (let i = event.messages.length - 1; i >= 0; i--) {
@@ -169,15 +146,6 @@ function executionKey(execution: unknown, session: unknown): string | undefined 
 		typeof value.executionId !== "string" || !value.executionId ||
 		typeof session !== "string" || !session) return undefined;
 	return JSON.stringify([value.taskId, value.executionId, getSessionIdentityPath(session)]);
-}
-
-function handoffDrainActive(): boolean {
-	const shared = (globalThis as unknown as Record<symbol, unknown>)[
-		Symbol.for("pi-handoff-queue.state")
-	] as { drainModeActive?: unknown; nativePhase?: unknown } | undefined;
-	return shared?.drainModeActive === true ||
-		shared?.nativePhase === "armed" ||
-		shared?.nativePhase === "launched";
 }
 
 /** Resolve an executable on PATH synchronously; null if not found. */
@@ -294,32 +262,9 @@ function setKittySessionFile(isTui: boolean, file: string): Promise<void> {
 
 export default function (pi: ExtensionAPI) {
 	let kittyConfigReloadStarted = false;
-	let expectedParleyAbort: number | undefined;
-	let expectedSubagentAbort: number | undefined;
 	const pendingExecutions = new Map<string, { body?: string; needsAttention: boolean; completionInput?: string }>();
-	const markerSequence = (payload: unknown, reason: string) => {
-		const value = payload as { version?: unknown; reason?: unknown; pid?: unknown; inputSeq?: unknown };
-		if (value?.version === 1 && value.reason === reason && value.pid === process.pid &&
-			Number.isSafeInteger(value.inputSeq) && (value.inputSeq as number) >= 0) return value.inputSeq as number;
-	};
-	const armParleyAbort = (payload: unknown) => { expectedParleyAbort = markerSequence(payload, "parley-origin"); };
-	const disarmParleyAbort = (payload: unknown) => {
-		const sequence = markerSequence(payload, "parley-origin");
-		if (sequence !== undefined && sequence === expectedParleyAbort) expectedParleyAbort = undefined;
-	};
-	const armSubagentAbort = (payload: unknown) => { expectedSubagentAbort = markerSequence(payload, "subagent-origin"); };
-	const disarmSubagentAbort = (payload: unknown) => {
-		const sequence = markerSequence(payload, "subagent-origin");
-		if (sequence !== undefined && sequence === expectedSubagentAbort) expectedSubagentAbort = undefined;
-	};
-	process.on("pi-parley:expected-origin-abort:v1", armParleyAbort);
-	process.on("pi-parley:expected-origin-abort-disarm:v1", disarmParleyAbort);
-	process.on("pi-subagent:expected-origin-abort:v1", armSubagentAbort);
-	process.on("pi-subagent:expected-origin-abort-disarm:v1", disarmSubagentAbort);
 	pi.on("session_start", async (_event, ctx) => {
 		pendingExecutions.clear();
-		expectedParleyAbort = undefined;
-		expectedSubagentAbort = undefined;
 		await setKittyAgentStatus(ctx.mode === "tui", "clear");
 		await setKittySessionFile(ctx.mode === "tui", ctx.sessionManager.getSessionFile() ?? "");
 	});
@@ -327,8 +272,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_start", async (_event, ctx) => setKittyAgentStatus(ctx.mode === "tui", "busy"));
 	pi.on("tool_execution_start", async (_event, ctx) => setKittyAgentStatus(ctx.mode === "tui", "busy"));
 	pi.on("agent_settled", async (event, ctx) => {
-		expectedParleyAbort = undefined;
-		expectedSubagentAbort = undefined;
 		const receipt = (event as { executionReceipt?: {
 			taskId: string; executionId: string; session: string; entryId: string; status: string; inputDeliveryId?: string;
 		} }).executionReceipt;
@@ -339,7 +282,7 @@ export default function (pi: ExtensionAPI) {
 			const pending = pendingExecutions.get(key);
 			pendingExecutions.delete(key);
 			if (!pending || key !== executionKey(receipt, ctx.sessionManager.getSessionFile())) return;
-			if (receipt.status !== "suspended" && pending.body !== undefined && !handoffDrainActive()) {
+			if (receipt.status !== "suspended" && pending.body !== undefined) {
 				const deliveryText = pending.completionInput ? parleyCompletionText(receipt, ctx) : undefined;
 				const aggregate = deliveryText !== undefined && deliveryText === pending.completionInput;
 				if (!(receipt.status === "completed" && aggregate && deliveryText !== undefined && emptyParleyCompletion(deliveryText))) {
@@ -356,12 +299,6 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", async (event, ctx) => {
 		pendingExecutions.clear();
-		expectedParleyAbort = undefined;
-		expectedSubagentAbort = undefined;
-		process.removeListener("pi-parley:expected-origin-abort:v1", armParleyAbort);
-		process.removeListener("pi-parley:expected-origin-abort-disarm:v1", disarmParleyAbort);
-		process.removeListener("pi-subagent:expected-origin-abort:v1", armSubagentAbort);
-		process.removeListener("pi-subagent:expected-origin-abort-disarm:v1", disarmSubagentAbort);
 		await setKittyAgentStatus(ctx.mode === "tui", "clear");
 		await setKittySessionFile(ctx.mode === "tui", "");
 		const socket = process.env.KITTY_LISTEN_ON;
@@ -380,10 +317,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 	pi.on("agent_end", async (event, ctx) => {
-		const suppressExpectedAbort = (expectedParleyAbort !== undefined || expectedSubagentAbort !== undefined) && isExpectedCancellation(event);
-		expectedParleyAbort = undefined;
-		expectedSubagentAbort = undefined;
-		const suppressed = suppressExpectedAbort || handoffDrainActive() || isHandoffTurn(event.messages);
+		const suppressed = isHandoffTurn(event.messages);
 		const key = executionKey((ctx as { execution?: unknown }).execution, ctx.sessionManager.getSessionFile());
 		if (key) {
 			const users = event.messages.filter((message) => (message as { role?: unknown })?.role === "user");

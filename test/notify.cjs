@@ -6,7 +6,7 @@ const { EventEmitter } = require("node:events");
 const os = require("node:os");
 const path = require("node:path");
 const childProcess = require("node:child_process");
-const ts = require("../../parley/node_modules/typescript");
+const ts = require(path.join(os.homedir(), "dev/pi/agent-bus/node_modules/typescript"));
 
 const root = path.resolve(__dirname, "..");
 const relocatedSessions = new Map();
@@ -66,7 +66,6 @@ const ctx = {
   isIdle: () => true,
   ui: { notify() {} },
 };
-const marker = { version: 1, reason: "parley-origin", pid: process.pid, inputSeq: 4 };
 const aborted = [{ role: "assistant", stopReason: "aborted", errorMessage: "Operation aborted", content: [] }];
 const currentAbort = [{ role: "assistant", stopReason: "error", errorMessage: "This operation was aborted", content: [] }];
 const balancedToolAbort = [
@@ -74,13 +73,6 @@ const balancedToolAbort = [
   { role: "toolResult", toolCallId: "tool-1", isError: true, content: [{ type: "text", text: "Command aborted" }] },
 ];
 const failure = [{ role: "assistant", stopReason: "error", errorMessage: "Provider failed", content: [] }];
-const armBaseline = process.listenerCount("pi-parley:expected-origin-abort:v1") - 1;
-const disarmBaseline = process.listenerCount("pi-parley:expected-origin-abort-disarm:v1") - 1;
-const subagentArm = "pi-subagent:expected-origin-abort:v1";
-const subagentDisarm = "pi-subagent:expected-origin-abort-disarm:v1";
-const subagentMarker = { ...marker, reason: "subagent-origin", inputSeq: 0 };
-const subagentArmBaseline = process.listenerCount(subagentArm) - 1;
-const subagentDisarmBaseline = process.listenerCount(subagentDisarm) - 1;
 const success = { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Worker finished." }] }], aborted: false };
 const cancelled = { messages: balancedToolAbort, aborted: true };
 
@@ -145,16 +137,10 @@ async function testNativeSettlement() {
     assert.equal(notifications.length, before + 1, `${status} settlement was suppressed`);
     assert.equal(statuses.at(-1), "done");
   }
-  for (const [name, payload] of [[subagentArm, subagentMarker], ["pi-parley:expected-origin-abort:v1", marker]]) {
-    before = notifications.length;
-    process.emit(name, payload);
-    await end(binding, cancelled);
-    await settle(receipt("aborted"));
-    assert.equal(notifications.length, before, "expected native abort notified");
-    await end(binding);
-    await settle(receipt("completed"));
-    assert.equal(notifications.length, before + 1, "expected abort suppressed completion wake");
-  }
+  before = notifications.length;
+  await end(binding, cancelled);
+  await settle(receipt("aborted"));
+  assert.equal(notifications.length, before + 1, "unmarked native abort was suppressed");
 
   before = notifications.length;
   await end(binding, { messages: failure, aborted: false });
@@ -281,8 +267,6 @@ async function testKittyRestart() {
       assert.equal(calls().length, before + 1, "failed reload retried during shutdown");
     }
     assert.equal(notices.length, 3);
-    assert.equal(process.listenerCount(subagentArm), subagentArmBaseline);
-    assert.equal(process.listenerCount(subagentDisarm), subagentDisarmBaseline);
     console.log("PASS  restart-only Kitty config reload: exact socket, awaited timeout, once, metadata and nonfatal failures");
   } finally {
     if (oldSocket === undefined) delete process.env.KITTY_LISTEN_ON;
@@ -396,96 +380,26 @@ async function main() {
     return;
   }
   await emit("session_start", { reason: "startup" });
-  process.emit("pi-parley:expected-origin-abort:v1", marker);
-  await emit("agent_end", { messages: balancedToolAbort, aborted: true });
-  assert.equal(notifications.length, 0, "marked balanced tool abort notified");
-
-  process.emit("pi-parley:expected-origin-abort:v1", marker);
-  process.emit("pi-parley:expected-origin-abort-disarm:v1", marker);
-  await emit("agent_end", { messages: currentAbort, aborted: false });
-  assert.equal(notifications.length, 1, "disarmed abort left stale suppression");
-
-  await emit("agent_end", { messages: aborted, aborted: true });
-  assert.equal(notifications.length, 2, "unmarked manual abort was suppressed");
-
-  process.emit("pi-parley:expected-origin-abort:v1", marker);
-  await emit("agent_end", { messages: failure, aborted: false });
-  assert.equal(notifications.length, 3, "marked genuine failure was suppressed");
-  await emit("agent_end", { messages: aborted, aborted: true });
-  assert.equal(notifications.length, 4, "genuine failure left stale suppression");
-
-  process.emit("pi-parley:expected-origin-abort:v1", marker);
-  await emit("agent_end", { messages: balancedToolAbort, aborted: true });
-  assert.equal(notifications.length, 4, "marked aborted result notified");
-
-  process.emit("pi-parley:expected-origin-abort:v1", { ...marker, pid: process.pid + 1 });
-  await emit("agent_end", { messages: balancedToolAbort, aborted: true });
-  assert.equal(notifications.length, 5, "invalid marker suppressed cancellation");
-
-  process.emit("pi-parley:expected-origin-abort:v1", marker);
-  await emit("agent_end", { messages: currentAbort });
-  assert.equal(notifications.length, 5, "legacy cancellation fallback notified");
-
-  process.emit("pi-parley:expected-origin-abort:v1", marker);
-  await emit("agent_settled");
-  await emit("agent_end", { messages: aborted, aborted: true });
-  assert.equal(notifications.length, 6, "settled marker remained armed");
-
-  process.emit(subagentArm, subagentMarker);
-  await expectNotification(cancelled, 0, "expected subagent interruption notified");
+  await expectNotification({ messages: aborted, aborted: true }, 1, "manual abort was suppressed");
+  await expectNotification(cancelled, 1, "tool cancellation was suppressed");
+  await expectNotification({ messages: failure, aborted: false }, 1, "genuine failure was suppressed");
   await expectNotification(success, 1, "successful completion wake was suppressed");
-  assert.equal(notifications.at(-1)[1][2], "Worker finished.");
-  await expectNotification(cancelled, 1, "manual/unreasoned abort was suppressed");
-
-  process.emit(subagentArm, subagentMarker);
-  process.emit(subagentDisarm, subagentMarker);
-  await expectNotification(cancelled, 1, "throw-disarmed subagent abort was suppressed");
-
-  for (const invalid of [null, {}, { version: 2 }, { reason: "parley-origin" }, { pid: process.pid + 1 },
-    { inputSeq: -1 }, { inputSeq: 0.5 }, { inputSeq: "0" }, { inputSeq: Number.MAX_SAFE_INTEGER + 1 }]) {
-    const payload = invalid === null ? null : { ...subagentMarker, ...invalid };
-    if (invalid && Object.keys(invalid).length === 0) delete payload.reason;
-    process.emit(subagentArm, payload);
-    await expectNotification(cancelled, 1, "invalid/rejected subagent marker suppressed abort");
+  for (const kind of [{ customType: 'bus-handoff' }, { customType: 'bus', details: { kind: 'handoff' } }]) {
+    await expectNotification({ messages: [{ role: 'custom', content: 'Step', ...kind }, ...success.messages], aborted: false }, 0,
+      'bus handoff step notified');
+  }
+  for (const kind of [{ customType: 'bus-continue' }, { customType: 'bus', details: { kind: 'result' } }]) {
+    await expectNotification({ messages: [{ role: 'custom', content: 'Work', ...kind }, ...success.messages], aborted: false }, 1,
+      'ordinary bus completion suppressed');
   }
 
-  process.emit(subagentArm, subagentMarker);
-  process.emit(subagentDisarm, { ...subagentMarker, inputSeq: 1 });
-  process.emit(subagentDisarm, { ...subagentMarker, reason: "parley-origin" });
-  process.emit("pi-parley:expected-origin-abort-disarm:v1", marker);
-  await expectNotification(cancelled, 0, "unmatched disarm cleared subagent suppression");
-
-  process.emit("pi-parley:expected-origin-abort:v1", marker);
-  process.emit(subagentDisarm, subagentMarker);
-  await expectNotification(cancelled, 0, "subagent disarm cleared legacy Parley suppression");
-  process.emit("pi-parley:expected-origin-abort:v1", subagentMarker);
-  await expectNotification(cancelled, 1, "subagent reason impersonated Parley");
-
-  for (const event of [success, { messages: failure, aborted: false }, { messages: currentAbort, aborted: false }, { messages: [] }]) {
-    process.emit(subagentArm, subagentMarker);
-    await expectNotification(event, 1, "non-cancellation suppressed by subagent marker");
-    await expectNotification(cancelled, 1, "non-cancellation left stale subagent arm");
-  }
-  process.emit(subagentArm, subagentMarker);
-  await expectNotification({ messages: currentAbort }, 0, "legacy subagent cancellation fallback notified");
-
-  for (const lifecycle of ["agent_settled", "session_start"]) {
-    process.emit(subagentArm, subagentMarker);
-    await emit(lifecycle, { reason: "reload" });
-    await expectNotification(cancelled, 1, `${lifecycle} left stale subagent arm`);
-  }
-  process.emit(subagentArm, subagentMarker);
+  assert.equal(process.listenerCount("pi-parley:expected-origin-abort:v1"), 0);
+  assert.equal(process.listenerCount("pi-subagent:expected-origin-abort:v1"), 0);
   await emit("session_shutdown");
-  assert.equal(process.listenerCount("pi-parley:expected-origin-abort:v1"), armBaseline, "shutdown leaked arm listener");
-  assert.equal(process.listenerCount("pi-parley:expected-origin-abort-disarm:v1"), disarmBaseline, "shutdown leaked disarm listener");
-  assert.equal(process.listenerCount(subagentArm), subagentArmBaseline, "shutdown leaked subagent arm listener");
-  assert.equal(process.listenerCount(subagentDisarm), subagentDisarmBaseline, "shutdown leaked subagent disarm listener");
   handlers.clear();
   loadExtension(path.join(root, "index.ts"))(pi);
   await emit("session_start", { reason: "reload" });
-  await expectNotification(cancelled, 1, "reload inherited subagent arm");
-  process.emit(subagentArm, subagentMarker);
-  await expectNotification(cancelled, 0, "reload lost subagent listener");
+  await expectNotification(cancelled, 1, "reload suppressed manual abort");
   await testNativeSettlement();
   await testEmptyParleyCompletion();
   const beforeShutdown = notifications.length;
@@ -494,17 +408,9 @@ async function main() {
     taskId: "task-a", executionId: "execution-a", session: ctx.sessionManager.getSessionFile(), entryId: "shutdown", status: "completed",
   } });
   assert.equal(notifications.length, beforeShutdown, "shutdown retained native body");
-  assert.equal(process.listenerCount(subagentArm), subagentArmBaseline);
-  assert.equal(process.listenerCount(subagentDisarm), subagentDisarmBaseline);
   console.log("PASS  native suspension, settled completion/error/abort, retry content and exact execution correlation");
-  console.log("PASS  Parley aggregates: exact receipt+durable delivery+input, empty success silent, nonempty labeled, direct distinct");
-  console.log("PASS  native marker suppression, lifecycle cleanup and unbound compatibility");
-  console.log("PASS  subagent one-shot, wake, validation, disarm correlation and Parley isolation");
-  console.log("PASS  subagent lifecycle clearing and reload listener cleanup");
-  console.log("PASS  expected parley abort suppresses exactly one cancellation-shaped notification");
-  console.log("PASS  manual aborts and genuine failures still notify");
-  console.log("PASS  matching Parley disarm clears suppression");
-  console.log("PASS  stale markers clear and shutdown removes listeners");
+  console.log("PASS  legacy Parley aggregates still correlated; unmarked aborts and failures notify");
+  console.log("PASS  bus handoff custom steps suppressed, ordinary bus successor/results notify; no legacy marker listeners");
   await testKittyRestart();
   await testNonTuiPaneIdentity();
   await testVisibility();
