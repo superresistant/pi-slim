@@ -13,7 +13,7 @@ let cachePredict = () => ({ probability: null, samples: 0, account: "", lastRequ
 globalThis.__piSlimCacheFixture = (options) => { cacheCalls.push(options); return cachePredict(options); };
 const shutdowns = new Set();
 registerHooks({ resolve(specifier, context, nextResolve) {
-	if (specifier === "@earendil-works/pi-coding-agent" && context.parentURL?.endsWith("/pi-slim-bus-prep/index.ts")) {
+	if (specifier === "@earendil-works/pi-coding-agent" && /\/pi-slim(?:-bus-prep)?\/index\.ts$/.test(context.parentURL ?? "")) {
 		const sdk = nextResolve(specifier, context);
 		const source = `export * from ${JSON.stringify(sdk.url)}; export const getCachePrediction = globalThis.__piSlimCacheFixture;`;
 		return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(source)}` };
