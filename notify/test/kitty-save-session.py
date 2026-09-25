@@ -2,7 +2,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import socket
 import subprocess
 import tempfile
 import unittest
@@ -37,7 +36,6 @@ class SaveSessionTest(unittest.TestCase):
         self.session = self.home / "session with spaces.jsonl"
         self.session.write_text('{"type":"session","id":"exact-session"}\n')
         self.pid = os.getpid() + 1_000_000_000
-        self.add_control_socket(self.pid)
         self.live = [{"id": 1, "tabs": [{"id": 1, "windows": [
             {"id": 7, "foreground_processes": [{"pid": self.pid, "cwd": str(self.home), "cmdline": ["pi"]}]},
         ]}]}]
@@ -59,30 +57,20 @@ class SaveSessionTest(unittest.TestCase):
             "    pathlib.Path(sys.argv[-1]).write_text(pathlib.Path(os.environ['SAVE_FIXTURE']).read_text())\n"
         )
         kitty.chmod(0o700)
-        ctl = binary / "pi-ctl"
-        ctl.write_text(
+        bus = binary / "bus"
+        bus.write_text(
             "#!/usr/bin/env python3\n"
-            "import json, os, pathlib, sys, time\n"
-            "assert sys.argv[1] == 'status'\n"
-            "data = json.loads(pathlib.Path(os.environ['SAVE_CONTROLS']).read_text()).get(pathlib.Path(sys.argv[2]).stem)\n"
-            "if data is None: sys.exit(1)\n"
-            "if isinstance(data, dict): time.sleep(data.pop('_delay', 0))\n"
-            "print(json.dumps(data))\n"
+            "import json, os, pathlib, sys\n"
+            "assert sys.argv[1:] == ['agents', '--json']\n"
+            "data = json.loads(pathlib.Path(os.environ['SAVE_CONTROLS']).read_text())\n"
+            "print(json.dumps([v for v in data.values() if v is not None]))\n"
         )
-        ctl.chmod(0o700)
+        bus.chmod(0o700)
         self.env = dict(os.environ, HOME=str(self.home),
                         PATH=f"{binary}:{os.environ['PATH']}",
                         KITTY_LISTEN_ON="unix:/test-kitty",
                         SAVE_FIXTURE=str(self.fixture), SAVE_STATE=str(self.home / 'live.json'),
                         SAVE_CONTROLS=str(self.home / 'controls.json'), **{FLAG: "1", **ANCHOR_ENV})
-
-    def add_control_socket(self, pid):
-        path = Path(f'/tmp/pi-ctl-{os.getuid()}/{pid}.sock')
-        path.parent.mkdir(mode=0o700, exist_ok=True)
-        control = socket.socket(socket.AF_UNIX)
-        control.bind(str(path))
-        self.addCleanup(lambda: path.unlink(missing_ok=True))
-        self.addCleanup(control.close)
 
     def save(self, text):
         self.fixture.write_text(text)
@@ -168,7 +156,6 @@ class SaveSessionTest(unittest.TestCase):
         child = self.home / 'transport-fixture' / 'session.jsonl'
         child.parent.mkdir()
         child.write_text('{"type":"session","id":"child"}\n')
-        self.add_control_socket(self.pid + 1)
         self.controls[str(self.pid + 1)] = {"pid": self.pid + 1, "cwd": str(self.home), "session": str(child)}
         self.live[0]['tabs'][0]['windows'].append({
             'id': 8, 'foreground_processes': [{'pid': self.pid + 1, 'cwd': str(self.home), 'cmdline': ['pi']}],
@@ -191,19 +178,18 @@ class SaveSessionTest(unittest.TestCase):
                 result = self.save(launch(*tag, self.serialized, '/original/pi') + '\n')
                 self.assertEqual(shlex.split(result), ['launch', self.serialized, '/usr/bin/pi', '--session', str(self.session)])
 
-    def test_bad_or_unavailable_control_preserves_foreground_command(self):
+    def test_bad_or_unavailable_agent_preserves_foreground_command(self):
         valid = dict(self.controls[str(self.pid)])
         command = [self.serialized, '/original/pi', '--session', '/explicit/session.jsonl', '--model', 'provider/model']
         for response in (None, [], {**valid, 'pid': self.pid + 1}, {**valid, 'cwd': '/other/project'},
-                         {**valid, 'session': 'relative.jsonl'}, {**valid, 'session': str(self.home / 'missing.jsonl')},
-                         {**valid, '_delay': 2}):
+                         {**valid, 'session': 'relative.jsonl'}, {**valid, 'session': str(self.home / 'missing.jsonl')}):
             with self.subTest(response=response):
                 self.controls[str(self.pid)] = response
                 result = self.save(launch('--var=pi_session=' + str(self.session), '--var=pi_state=busy', *command) + '\n')
                 self.assertEqual(shlex.split(result), ['launch', *command])
 
     def test_missing_ambiguous_and_unknown_window_identity_never_uses_tag(self):
-        self.add_control_socket(self.pid + 1)
+        self.controls[str(self.pid + 1)] = {'pid': self.pid + 1, 'cwd': str(self.home), 'session': str(self.session)}
         foreground = {'pid': self.pid, 'cwd': str(self.home), 'cmdline': ['pi']}
         another = {'pid': self.pid + 1, 'cwd': str(self.home), 'cmdline': ['pi']}
         for windows in ([], [{'id': 7, 'foreground_processes': []}],
@@ -215,8 +201,8 @@ class SaveSessionTest(unittest.TestCase):
                 result = self.save(launch('--var=pi_session=' + str(self.session), self.serialized, '/original/pi') + '\n')
                 self.assertEqual(shlex.split(result), ['launch', self.serialized, '/original/pi'])
 
-    def test_missing_socket_or_invalid_snapshot_never_uses_tag(self):
-        Path(f'/tmp/pi-ctl-{os.getuid()}/{self.pid}.sock').unlink()
+    def test_unregistered_agent_or_invalid_snapshot_never_uses_tag(self):
+        del self.controls[str(self.pid)]
         for live in (self.live, None, 'unavailable'):
             with self.subTest(live=live):
                 self.live = live

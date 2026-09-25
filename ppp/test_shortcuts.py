@@ -17,7 +17,7 @@ from pathlib import Path
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 record = {"name": name, "args": args, "cwd": os.getcwd()}
-if name == "fzf" or args == ["--serve"]:
+if name == "fzf":
     record["input"] = sys.stdin.read()
 with open(os.environ["CALLS"], "a") as f:
     f.write(json.dumps(record) + "\\n")
@@ -43,7 +43,7 @@ class Shortcuts(unittest.TestCase):
         self.folder = self.root / "project with spaces"
         for path in (self.home, self.bin, self.folder):
             path.mkdir()
-        for name in ("parley-remote", "zoxide", "fzf", "pi"):
+        for name in ("bus", "zoxide", "fzf", "pi"):
             executable = self.bin / name
             executable.write_text(STUB)
             executable.chmod(0o755)
@@ -59,7 +59,7 @@ class Shortcuts(unittest.TestCase):
     def assert_open(self, result, folder, *options):
         self.assertEqual(result.returncode, 0, result.stderr)
         call = self.calls()[-1]
-        self.assertEqual(call, {"name": "parley-remote", "args": ["--open-local", str(folder), *map(str, options)], "cwd": str(folder)})
+        self.assertEqual(call, {"name": "bus", "args": ["open", str(folder), *map(str, options)], "cwd": str(folder)})
         self.assertNotIn("pi", [call["name"] for call in self.calls()])
 
     def test_noargs(self):
@@ -108,10 +108,8 @@ class Shortcuts(unittest.TestCase):
         result = self.pp("update")
         self.assertEqual(result.returncode, 0, result.stderr)
         call, = self.calls()
-        self.assertEqual(call["args"], ["--serve"])
-        payload = json.loads(call["input"])
-        self.assertRegex(payload.pop("id"), r"^pp-update-\d+-\d+$")
-        self.assertEqual(payload, {"folder": str(self.home / "dev/pi/pi-local"), "aim": UPDATE_AIM, "sender": "pp update", "timeout": 7200, "startup_timeout": 45})
+        self.assertEqual(call["name"], "bus")
+        self.assertEqual(call["args"], ["ask", "--wait", "--timeout", "7200", "--to", str(self.home / "dev/pi/pi-local"), UPDATE_AIM])
 
     def test_update_with_extra_args_still_zoxide(self):
         self.assert_open(self.pp("update", "other"), self.folder)
@@ -163,7 +161,7 @@ class Shortcuts(unittest.TestCase):
         self.picker_fixture()
         self.env["OPEN_STATUS"] = "8"
         self.assertEqual(self.ppp().returncode, 8)
-        self.assertEqual([call["name"] for call in self.calls()], ["fzf", "parley-remote"])
+        self.assertEqual([call["name"] for call in self.calls()], ["fzf", "bus"])
 
 
 if __name__ == "__main__":

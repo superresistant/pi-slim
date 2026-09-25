@@ -52,7 +52,6 @@ import os
 import shlex
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 DROP_ENV = {
@@ -91,7 +90,16 @@ def read_windows():
         return {}
 
 windows = read_windows()
-identity_deadline = time.monotonic() + 10
+
+def read_agents():
+    try:
+        result = subprocess.run(["bus", "agents", "--json"], check=True, capture_output=True, text=True, timeout=5)
+        return {agent["pid"]: agent for agent in json.loads(result.stdout)
+                if isinstance(agent, dict) and type(agent.get("pid")) is int}
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        return {}
+
+agents = read_agents()
 
 def foreground_session(window_id):
     window = windows.get(window_id)
@@ -100,32 +108,17 @@ def foreground_session(window_id):
     candidates = {}
     for process in window.get("foreground_processes", []):
         pid = process.get("pid")
-        if type(pid) is int and pid > 0:
-            control = Path(f"/tmp/pi-ctl-{os.getuid()}/{pid}.sock")
-            if control.is_socket():
-                candidates[pid] = (process.get("cwd"), control)
+        if type(pid) is int and pid in agents:
+            candidates[pid] = process.get("cwd")
     if len(candidates) != 1:
         return "", ""
-    pid, (cwd, control) = next(iter(candidates.items()))
-    remaining = identity_deadline - time.monotonic()
-    if not isinstance(cwd, str) or not os.path.isabs(cwd) or remaining <= 0:
-        return "", ""
-    try:
-        result = subprocess.run(
-            ["pi-ctl", "status", str(control)],
-            check=True, capture_output=True, text=True, timeout=min(1, remaining),
-        )
-        status = json.loads(result.stdout)
-        session = status.get("session")
-        live_cwd = status.get("cwd")
-        if (type(status.get("pid")) is int and status["pid"] == pid
-                and isinstance(live_cwd, str) and os.path.isabs(live_cwd)
-                and os.path.realpath(live_cwd) == os.path.realpath(cwd)
-                and isinstance(session, str) and os.path.isabs(session)
-                and Path(session).is_file()):
-            return session, live_cwd
-    except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
-        pass
+    pid, cwd = next(iter(candidates.items()))
+    session, live_cwd = agents[pid].get("session"), agents[pid].get("cwd")
+    if (isinstance(cwd, str) and os.path.isabs(cwd)
+            and isinstance(live_cwd, str) and os.path.isabs(live_cwd)
+            and os.path.realpath(live_cwd) == os.path.realpath(cwd)
+            and isinstance(session, str) and os.path.isabs(session) and Path(session).is_file()):
+        return session, live_cwd
     return "", ""
 
 def rewrite_launch(line):

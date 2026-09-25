@@ -5,6 +5,6 @@ pi-slim — terminal UX for Pi on this desktop (Kitty, GNOME X11). Loaded as a P
 `notify/bin/kitty-save-session` Kitty autosave (timer) and Ctrl+Shift+S: verified Pi panes restore as `pi --session FILE`
 `clip/` `clipclean --watch` service unwraps padded TUI copies; `kitty-paste` (Ctrl+V/right-click) cleans then sends one bracketed paste, images forward Ctrl+V to Pi
 `note/` notes scratchpad: real Pi editor, no agent; Ctrl+Shift+N `kitty-notes` opens split beside pane; autosave `~/.local/share/pi-notes/`
-`ppp/ppp` fzf picker over session text; `pp` in `~/.bash_aliases`; both open via `parley-remote --open-local`
+`ppp/ppp` fzf picker over session text; `pp` in `~/.bash_aliases`; both open via `bus open` (focus live Pi, else start here); `pp update` asks pi-local via `bus ask --wait`
 
 Tests: `npm test` (unit); `npm run test:helper` (isolated Kitty/Xvfb PTYs)

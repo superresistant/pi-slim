@@ -224,7 +224,6 @@ async function main() {
       'ordinary bus completion suppressed');
   }
 
-  assert.equal(process.listenerCount("pi-parley:expected-origin-abort:v1"), 0);
   assert.equal(process.listenerCount("pi-subagent:expected-origin-abort:v1"), 0);
   await emit("session_shutdown");
   assert.equal(bus.listenerCount('agent-bus:autopilot:v1'), 0);

@@ -172,7 +172,7 @@ def main():
     cwd = metadata.get(path, "")
     if cwd and os.path.isdir(cwd):
         os.chdir(cwd)
-    os.execvp("parley-remote", ["parley-remote", "--open-local", os.getcwd(), "--session", path])
+    os.execvp("bus", ["bus", "open", os.getcwd(), "--session", path])
 
 
 if __name__ == "__main__":
