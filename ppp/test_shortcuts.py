@@ -109,7 +109,7 @@ class Shortcuts(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         call, = self.calls()
         self.assertEqual(call["name"], "bus")
-        self.assertEqual(call["args"], ["ask", "--wait", "--timeout", "7200", "--to", str(self.home / "dev/pi/pi-local"), UPDATE_AIM])
+        self.assertEqual(call["args"], ["ask", "--wait", "--timeout", "7200", "--to", "desktop:/home/sr/dev/pi/pi-local", UPDATE_AIM])
 
     def test_update_with_extra_args_still_zoxide(self):
         self.assert_open(self.pp("update", "other"), self.folder)
