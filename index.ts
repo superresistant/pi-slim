@@ -88,8 +88,8 @@ function isHandoffTurn(messages: unknown[]): boolean {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i] as { role?: unknown; customType?: unknown; details?: { kind?: unknown } };
 		if (message?.role === "custom") {
-			if (message.customType === "bus-handoff" || message.customType === "bus")
-				return message.customType === "bus-handoff" || message.details?.kind === "handoff";
+			if (message.customType === "bus-handoff" || message.customType === "bus-autopilot" || message.customType === "bus")
+				return message.customType === "bus-handoff" || message.customType === "bus-autopilot" || message.details?.kind === "handoff";
 		}
 		if (message?.role === "user") return false;
 	}
@@ -263,8 +263,21 @@ function setKittySessionFile(isTui: boolean, file: string): Promise<void> {
 export default function (pi: ExtensionAPI) {
 	let kittyConfigReloadStarted = false;
 	const pendingExecutions = new Map<string, { body?: string; needsAttention: boolean; completionInput?: string }>();
+	let activeSession: { cwd: string; session: string } | undefined;
+	const stopAutopilotListener = pi.events.on("agent-bus:autopilot:v1", (payload: unknown) => {
+		const event = payload as { pid?: unknown; cwd?: unknown; session?: unknown; state?: unknown; reason?: unknown };
+		if (!activeSession || event?.pid !== process.pid || event.cwd !== activeSession.cwd || event.session !== activeSession.session ||
+			(event.state !== "off" && event.state !== "waiting") || typeof event.reason !== "string") return;
+		const reason = stripControl(event.reason.replace(/[\r\n\t]+/g, " ")).replace(/\s+/g, " ").trim();
+		const label = event.state === "off" ? "stopped" : "waiting";
+		const body = Array.from(`Autopilot ${label}${reason ? `: ${reason}` : ""}`).slice(0, MAX_BODY_CHARS).join("");
+		notify(notificationTitle(), body, true);
+	});
 	pi.on("session_start", async (_event, ctx) => {
 		pendingExecutions.clear();
+		activeSession = ctx.mode === "tui" && ctx.sessionManager.getSessionFile()
+			? { cwd: fs.realpathSync(ctx.cwd), session: ctx.sessionManager.getSessionFile()! }
+			: undefined;
 		await setKittyAgentStatus(ctx.mode === "tui", "clear");
 		await setKittySessionFile(ctx.mode === "tui", ctx.sessionManager.getSessionFile() ?? "");
 	});
@@ -299,6 +312,8 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", async (event, ctx) => {
 		pendingExecutions.clear();
+		activeSession = undefined;
+		stopAutopilotListener();
 		await setKittyAgentStatus(ctx.mode === "tui", "clear");
 		await setKittySessionFile(ctx.mode === "tui", "");
 		const socket = process.env.KITTY_LISTEN_ON;

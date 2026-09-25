@@ -19,7 +19,9 @@ local dispatcher, which uses `notify-send` without touching TUI stdout.
   Markdown/control syntax is stripped; errors and empty responses have safe
   fallbacks.
 - Agent-bus handoff steps (`bus-handoff` and delivered `bus` messages with
-  `details.kind=handoff`) never notify; ordinary successor work and bus results do.
+  `details.kind=handoff`) and autopilot pulses (`bus-autopilot`) never notify;
+  ordinary successor work and bus results do. Exact `agent-bus:autopilot:v1`
+  off/waiting events notify once per event, including reason.
 - Every desktop event is handed to detached `notify.py`, the notification-side
   dispatcher. It maps `KITTY_WINDOW_ID` to the stable Kitty tab ID and checks a
   mute marker under `$XDG_RUNTIME_DIR/pi-notify-muted-tabs/` before invoking

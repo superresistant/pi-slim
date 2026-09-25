@@ -51,8 +51,11 @@ process.env.DISPLAY = ":test";
 
 const handlers = new Map();
 const branch = [];
+const events = new EventEmitter();
+const bus = { on(channel, handler) { events.on(channel, handler); return () => events.off(channel, handler); },
+  emit(channel, payload) { events.emit(channel, payload); }, listenerCount(channel) { return events.listenerCount(channel); } };
 const pi = {
-  events: new EventEmitter(),
+  events: bus,
   on(name, handler) { handlers.set(name, [...(handlers.get(name) || []), handler]); },
   sendUserMessage() {},
 };
@@ -211,7 +214,7 @@ async function testKittyRestart() {
   const calls = () => execCalls.filter(call => call.command === "kitten");
   const fresh = () => {
     const events = new Map();
-    loadExtension(path.join(root, "index.ts"))({ on: (name, handler) => events.set(name, handler) });
+    loadExtension(path.join(root, "index.ts"))({ events: { on: () => () => {} }, on: (name, handler) => events.set(name, handler) });
     return (name, reason) => events.get(name)({ reason }, restartCtx);
   };
   try {
@@ -365,6 +368,31 @@ async function testRelocatedSession() {
   }
 }
 
+async function testAutopilot() {
+  const channel = 'agent-bus:autopilot:v1';
+  const valid = { pid: process.pid, cwd: ctx.cwd, session: ctx.sessionManager.getSessionFile(), state: 'waiting', reason: 'Awaiting reviewer' };
+  const before = notifications.length;
+  for (const invalid of [{ ...valid, pid: process.pid + 1 }, { ...valid, cwd: '/tmp/wrong' },
+    { ...valid, session: '/tmp/wrong.jsonl' }, { ...valid, state: 'on' }, { ...valid, reason: 42 }]) bus.emit(channel, invalid);
+  assert.equal(notifications.length, before, 'unmatched autopilot event notified');
+  bus.emit(channel, { ...valid, reason: 'Awaiting\nreviewer\x1b[31m' });
+  assert.equal(notifications.length, before + 1);
+  assert.equal(notifications.at(-1)[1][2], 'Autopilot waiting: Awaiting reviewer[31m');
+  assert.equal(notifications.at(-1)[1].includes('--completion'), false);
+  bus.emit(channel, { ...valid, state: 'off', reason: 'PAUSE_UNSAFE' });
+  assert.equal(notifications.at(-1)[1][2], 'Autopilot stopped: PAUSE_UNSAFE');
+  const pulse = { messages: [{ role: 'custom', customType: 'bus-autopilot', content: 'Continue' }, ...success.messages], aborted: false };
+  await expectNotification(pulse, 0, 'autopilot pulse notified');
+  const binding = { taskId: 'autopilot-task', executionId: 'autopilot-execution' };
+  ctx.execution = binding;
+  await expectNotification(pulse, 0, 'bound autopilot pulse notified before receipt');
+  delete ctx.execution;
+  await emit('agent_settled', { executionReceipt: { ...binding, status: 'completed', session: valid.session, entryId: 'autopilot-settled' } });
+  assert.equal(notifications.length, before + 2, 'bound autopilot pulse notified after receipt');
+  assert.equal(statuses.at(-1), 'done');
+  await expectNotification(success, 1, 'later normal work stayed muted after autopilot');
+}
+
 async function main() {
   if (process.argv.includes("--relocation")) {
     await testRelocatedSession();
@@ -380,6 +408,8 @@ async function main() {
     return;
   }
   await emit("session_start", { reason: "startup" });
+  assert.equal(bus.listenerCount('agent-bus:autopilot:v1'), 1);
+  await testAutopilot();
   await expectNotification({ messages: aborted, aborted: true }, 1, "manual abort was suppressed");
   await expectNotification(cancelled, 1, "tool cancellation was suppressed");
   await expectNotification({ messages: failure, aborted: false }, 1, "genuine failure was suppressed");
@@ -396,20 +426,26 @@ async function main() {
   assert.equal(process.listenerCount("pi-parley:expected-origin-abort:v1"), 0);
   assert.equal(process.listenerCount("pi-subagent:expected-origin-abort:v1"), 0);
   await emit("session_shutdown");
+  assert.equal(bus.listenerCount('agent-bus:autopilot:v1'), 0);
   handlers.clear();
   loadExtension(path.join(root, "index.ts"))(pi);
   await emit("session_start", { reason: "reload" });
+  assert.equal(bus.listenerCount('agent-bus:autopilot:v1'), 1);
   await expectNotification(cancelled, 1, "reload suppressed manual abort");
   await testNativeSettlement();
   await testEmptyParleyCompletion();
   const beforeShutdown = notifications.length;
   await emit("session_shutdown");
+  assert.equal(bus.listenerCount('agent-bus:autopilot:v1'), 0);
+  bus.emit('agent-bus:autopilot:v1', { pid: process.pid, cwd: ctx.cwd, session: ctx.sessionManager.getSessionFile(), state: 'off', reason: 'stale' });
+  assert.equal(notifications.length, beforeShutdown, 'shutdown retained autopilot listener');
   await emit("agent_settled", { executionReceipt: {
     taskId: "task-a", executionId: "execution-a", session: ctx.sessionManager.getSessionFile(), entryId: "shutdown", status: "completed",
   } });
   assert.equal(notifications.length, beforeShutdown, "shutdown retained native body");
   console.log("PASS  native suspension, settled completion/error/abort, retry content and exact execution correlation");
   console.log("PASS  legacy Parley aggregates still correlated; unmarked aborts and failures notify");
+  console.log("PASS  bus autopilot pulses silent, exact off/waiting events notify; lifecycle listeners cleaned");
   console.log("PASS  bus handoff custom steps suppressed, ordinary bus successor/results notify; no legacy marker listeners");
   await testKittyRestart();
   await testNonTuiPaneIdentity();
@@ -420,7 +456,7 @@ async function main() {
 async function testNonTuiPaneIdentity() {
   for (const mode of ['rpc', 'json', 'print']) {
     const events = new Map();
-    loadExtension(path.join(root, 'index.ts'))({ events: new EventEmitter(), on: (name, handler) => events.set(name, handler) });
+    loadExtension(path.join(root, 'index.ts'))({ events: { on: () => () => {} }, on: (name, handler) => events.set(name, handler) });
     const before = execCalls.length;
     const context = { ...ctx, mode, hasUI: mode === 'rpc' };
     for (const name of ['session_start', 'before_agent_start', 'agent_start', 'tool_execution_start', 'agent_settled', 'session_shutdown']) {
