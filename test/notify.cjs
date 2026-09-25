@@ -9,7 +9,6 @@ const childProcess = require("node:child_process");
 const ts = require(path.join(os.homedir(), "dev/pi/agent-bus/node_modules/typescript"));
 
 const root = path.resolve(__dirname, "..");
-const relocatedSessions = new Map();
 function loadExtension(sourcePath) {
   const source = readFileSync(sourcePath, "utf8").replaceAll("import.meta.url", JSON.stringify(require("node:url").pathToFileURL(sourcePath).href));
   const output = ts.transpileModule(source, {
@@ -19,10 +18,6 @@ function loadExtension(sourcePath) {
   const loaded = new Module(`${sourcePath}.test.cjs`, module);
   loaded.filename = `${sourcePath}.test.cjs`;
   loaded.paths = Module._nodeModulePaths(path.dirname(sourcePath));
-  const originalRequire = loaded.require.bind(loaded);
-  loaded.require = id => id === "@earendil-works/pi-coding-agent"
-    ? { getSessionIdentityPath: file => relocatedSessions.get(file) ?? file }
-    : originalRequire(id);
   loaded._compile(output, loaded.filename);
   return loaded.exports.default;
 }
@@ -50,7 +45,6 @@ process.env.PATH = `${temp}:${old.PATH || ""}`;
 process.env.DISPLAY = ":test";
 
 const handlers = new Map();
-const branch = [];
 const events = new EventEmitter();
 const bus = { on(channel, handler) { events.on(channel, handler); return () => events.off(channel, handler); },
   emit(channel, payload) { events.emit(channel, payload); }, listenerCount(channel) { return events.listenerCount(channel); } };
@@ -65,7 +59,7 @@ const ctx = {
   hasUI: true,
   cwd: temp,
   model: { provider: "test", id: "model" },
-  sessionManager: { getSessionFile: () => "/tmp/test.jsonl", getLeafId: () => null, getBranch: () => branch },
+  sessionManager: { getSessionFile: () => "/tmp/test.jsonl", getLeafId: () => null },
   isIdle: () => true,
   ui: { notify() {} },
 };
@@ -95,116 +89,6 @@ async function waitFor(predicate, timeout = 2000) {
     if (Date.now() >= deadline) throw new Error("timed out waiting for condition");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-}
-
-async function testNativeSettlement() {
-  const session = ctx.sessionManager.getSessionFile();
-  const binding = { taskId: "task-a", executionId: "execution-a", roundId: "round-1" };
-  const receipt = (status, extra = {}) => ({ ...binding, status, session, entryId: `receipt-${status}`, ...extra });
-  const settle = async (value) => emit("agent_settled", { executionReceipt: value });
-  const end = async (execution, event = success) => {
-    ctx.execution = execution;
-    await expectNotification(event, 0, "native end notified before settlement");
-    delete ctx.execution;
-  };
-  let before = notifications.length;
-  let stateBefore = statuses.length;
-  await end(binding);
-  await settle(receipt("suspended"));
-  assert.equal(notifications.length, before, "suspended checkpoint notified");
-  assert.deepEqual(statuses.slice(stateBefore), ["clear"], "suspension advertised done");
-  await settle(receipt("completed"));
-  assert.equal(notifications.length, before, "suspended content leaked into later settlement");
-
-  await end({ ...binding, roundId: "round-2" }, { messages: failure, aborted: false });
-  await end({ ...binding, roundId: "round-2" });
-  assert.equal(notifications.length, before, "native retry notified");
-  stateBefore = statuses.length;
-  await settle(receipt("started"));
-  assert.equal(statuses.length, stateBefore, "started receipt advertised done");
-  for (const wrong of [{ executionId: "other" }, { taskId: "other" }, { session: "/tmp/other.jsonl" }]) {
-    await settle(receipt("completed", wrong));
-    assert.equal(notifications.length, before, "unrelated receipt mixed execution content");
-  }
-  await settle(receipt("completed"));
-  assert.equal(notifications.length, before + 1);
-  assert.equal(notifications.at(-1)[1][2], "Worker finished.", "retry error replaced final content");
-  assert.equal(statuses.at(-1), "done");
-  await settle(receipt("completed"));
-  assert.equal(notifications.length, before + 1, "duplicate settlement notified");
-
-  for (const [status, event] of [["failed", { messages: failure, aborted: false }], ["aborted", cancelled]]) {
-    before = notifications.length;
-    await end(binding, event);
-    await settle(receipt(status));
-    assert.equal(notifications.length, before + 1, `${status} settlement was suppressed`);
-    assert.equal(statuses.at(-1), "done");
-  }
-  before = notifications.length;
-  await end(binding, cancelled);
-  await settle(receipt("aborted"));
-  assert.equal(notifications.length, before + 1, "unmarked native abort was suppressed");
-
-  before = notifications.length;
-  await end(binding, { messages: failure, aborted: false });
-  const other = { ...binding, executionId: "execution-b" };
-  await end(other);
-  await settle(receipt("completed", other));
-  assert.equal(notifications.at(-1)[1][2], "Worker finished.");
-  await settle(receipt("failed"));
-  assert.equal(notifications.length, before + 2);
-  assert.equal(notifications.at(-1)[1][2], "Provider failed", "independent executions shared last body");
-
-  before = notifications.length;
-  await end(binding);
-  await emit("session_start", { reason: "reload" });
-  await settle(receipt("completed"));
-  assert.equal(notifications.length, before, "session start retained native body");
-  await expectNotification(success, 1, "unbound legacy end no longer notified immediately");
-  await emit("agent_settled");
-  assert.equal(notifications.length, before + 1, "legacy settled duplicated notification");
-  assert.equal(statuses.at(-1), "done");
-  await end(binding);
-}
-
-async function testEmptyParleyCompletion() {
-  const session = ctx.sessionManager.getSessionFile();
-  const empty = '[PARLEY COMPLETE]\n\n--- /home/sr/dev/pi/gmail-api state=succeeded ---\n\n';
-  const multiple = `${empty}\n\n--- /home/sr/dev/pi/mail-router state=succeeded ---\n\n`;
-  const nonempty = `${empty}Actual result.`;
-  const id = 'parley:79455b1e-6721-4dd0-95bc-48e570989f7f:complete';
-  const input = text => ({ role: 'user', content: [{ type: 'text', text }] });
-  const entry = (text, binding, kind = 'parley', deliveryId = id) => ({
-    type: 'message', message: { ...input(text), delivery: { id: deliveryId, kind, execution: binding } },
-  });
-  let counter = 0;
-  const check = async ({ text = empty, kind = 'parley', deliveryId = id, receiptId = id,
-                         extraUser = false, wrongExecution = false, status = 'completed', expected = 0, aggregate = false }) => {
-    const binding = { taskId: 'task-parley', executionId: `exec-${++counter}` };
-    const event = { messages: [input(text), ...(extraUser ? [input('Another request')] : []), ...success.messages], aborted: false };
-    branch.splice(0, branch.length, entry(text, wrongExecution ? { ...binding, executionId: 'other' } : binding, kind, deliveryId));
-    const before = notifications.length;
-    ctx.execution = binding;
-    await emit('agent_end', event);
-    delete ctx.execution;
-    assert.equal(notifications.length, before, 'native Parley input notified before receipt');
-    await emit('agent_settled', { executionReceipt: { ...binding, status, session, entryId: `entry-${counter}`, inputDeliveryId: receiptId } });
-    assert.equal(notifications.length, before + expected, `wrong Parley notification for ${JSON.stringify({ status, text, kind, deliveryId, receiptId, extraUser })}`);
-    if (expected) assert.equal(notifications.at(-1)[1][2], `${aggregate ? 'Parley aggregate · ' : ''}Worker finished.`);
-    assert.equal(statuses.at(-1), 'done');
-    branch.splice(0);
-  };
-  await check({});
-  await check({ text: multiple });
-  await check({ text: nonempty, expected: 1, aggregate: true });
-  await check({ kind: 'user', expected: 1 });
-  await check({ deliveryId: 'parley:other:complete', expected: 1 });
-  await check({ wrongExecution: true, expected: 1 });
-  await check({ receiptId: null, expected: 1 });
-  await check({ extraUser: true, expected: 1 });
-  await check({ status: 'failed', expected: 1, aggregate: true });
-  await check({ text: '[PARLEY COMPLETE]\n\n--- /tmp/test state=failed ---\n\n', expected: 1, aggregate: true });
-  await expectNotification({ messages: [input(empty), ...success.messages], aborted: false }, 1, 'legacy unbound Parley text suppressed');
 }
 
 async function testKittyRestart() {
@@ -289,83 +173,8 @@ async function testVisibility() {
     await expectNotification(event, 1, "legacy notification missing");
     assert.equal(notifications.at(-1)[1].includes("--completion"), completion);
   }
-  const binding = { taskId: "visibility", executionId: "execution", roundId: "round" };
-  const end = async (event) => {
-    ctx.execution = binding;
-    await expectNotification(event, 0, "native notification preceded receipt");
-    delete ctx.execution;
-  };
-  for (const [status, event, completion] of [
-    ["completed", success, true], ["failed", success, false], ["aborted", success, false],
-    ["completed", { messages: failure, aborted: false }, false],
-    ["completed", cancelled, false],
-  ]) {
-    await end({ messages: failure, aborted: false });
-    await end(event);
-    const before = notifications.length;
-    await emit("agent_settled", { executionReceipt: {
-      ...binding, status, session: ctx.sessionManager.getSessionFile(), entryId: `visibility-${status}`,
-    } });
-    assert.equal(notifications.length, before + 1);
-    assert.equal(notifications.at(-1)[1].includes("--completion"), completion, `${status} attention classification`);
-  }
   await emit("session_shutdown");
-  console.log("PASS  completion visibility opt-in; legacy/native errors and aborts retained, retries and receipts authoritative");
-}
-
-async function testRelocatedSession() {
-  const getSessionFile = ctx.sessionManager.getSessionFile;
-  const isIdle = ctx.isIdle;
-  const identity = "/tmp/original/session.jsonl";
-  const storage = "/tmp/moved/session.jsonl";
-  relocatedSessions.set(storage, identity);
-  ctx.sessionManager.getSessionFile = () => storage;
-  const binding = { taskId: "relocated-task", executionId: "relocated-execution" };
-  const receipt = status => ({ ...binding, status, session: identity, entryId: `relocated-${status}` });
-  const end = async () => {
-    await emit("before_agent_start");
-    ctx.execution = binding;
-    await expectNotification(success, 0, "relocated native end notified before settlement");
-    delete ctx.execution;
-  };
-  try {
-    await emit("session_start", { reason: "startup" });
-    assert.deepEqual(execCalls.at(-1).args, ["session-file", storage], "Kitty must retain launchable storage path");
-    for (const status of ["completed", "failed", "aborted", "suspended"]) {
-      await end();
-      const before = notifications.length;
-      const beforeState = statuses.length;
-      await emit("agent_settled", { executionReceipt: { ...receipt(status), session: "/tmp/unrelated.jsonl" } });
-      assert.equal(statuses.length, beforeState, "unrelated receipt cleared busy state");
-      await emit("agent_settled", { executionReceipt: receipt(status) });
-      assert.equal(statuses.at(-1), status === "suspended" ? "clear" : "done");
-      assert.equal(notifications.length, before + (status === "suspended" ? 0 : 1));
-      const settledState = statuses.length;
-      await emit("agent_settled", { executionReceipt: receipt(status) });
-      assert.equal(statuses.length, settledState, "duplicate receipt changed state");
-      assert.equal(notifications.length, before + (status === "suspended" ? 0 : 1));
-    }
-    await end();
-    const busyState = statuses.length;
-    ctx.isIdle = () => false;
-    await emit("agent_settled", { executionReceipt: receipt("completed") });
-    assert.equal(statuses.length, busyState, "settlement overwrote a new busy run");
-    ctx.isIdle = isIdle;
-    await end();
-    ctx.sessionManager.getSessionFile = () => "/tmp/different-session.jsonl";
-    const before = notifications.length;
-    const beforeState = statuses.length;
-    await emit("agent_settled", { executionReceipt: receipt("completed") });
-    assert.equal(notifications.length, before, "receipt crossed conversation boundary");
-    assert.equal(statuses.length, beforeState, "old conversation cleared current busy state");
-    console.log("PASS relocated-session settlement: canonical identity, launchable metadata, terminal states, duplicate/unrelated receipts and busy/session isolation");
-  } finally {
-    ctx.sessionManager.getSessionFile = getSessionFile;
-    ctx.isIdle = isIdle;
-    delete ctx.execution;
-    relocatedSessions.clear();
-    await emit("session_shutdown");
-  }
+  console.log("PASS  completion visibility opt-in; errors and aborts retained");
 }
 
 async function testAutopilot() {
@@ -383,21 +192,13 @@ async function testAutopilot() {
   assert.equal(notifications.at(-1)[1][2], 'Autopilot stopped: PAUSE_UNSAFE');
   const pulse = { messages: [{ role: 'custom', customType: 'bus-autopilot', content: 'Continue' }, ...success.messages], aborted: false };
   await expectNotification(pulse, 0, 'autopilot pulse notified');
-  const binding = { taskId: 'autopilot-task', executionId: 'autopilot-execution' };
-  ctx.execution = binding;
-  await expectNotification(pulse, 0, 'bound autopilot pulse notified before receipt');
-  delete ctx.execution;
-  await emit('agent_settled', { executionReceipt: { ...binding, status: 'completed', session: valid.session, entryId: 'autopilot-settled' } });
-  assert.equal(notifications.length, before + 2, 'bound autopilot pulse notified after receipt');
+  await emit('agent_settled');
+  assert.equal(notifications.length, before + 2, 'settled autopilot pulse notified');
   assert.equal(statuses.at(-1), 'done');
   await expectNotification(success, 1, 'later normal work stayed muted after autopilot');
 }
 
 async function main() {
-  if (process.argv.includes("--relocation")) {
-    await testRelocatedSession();
-    return;
-  }
   if (process.argv.includes("--visibility")) {
     await testVisibility();
     return;
@@ -432,25 +233,22 @@ async function main() {
   await emit("session_start", { reason: "reload" });
   assert.equal(bus.listenerCount('agent-bus:autopilot:v1'), 1);
   await expectNotification(cancelled, 1, "reload suppressed manual abort");
-  await testNativeSettlement();
-  await testEmptyParleyCompletion();
+  let before = notifications.length;
+  await expectNotification(success, 1, "completion not notified at agent_end");
+  await emit("agent_settled");
+  assert.equal(notifications.length, before + 1, "settled duplicated notification");
+  assert.equal(statuses.at(-1), "done");
   const beforeShutdown = notifications.length;
   await emit("session_shutdown");
   assert.equal(bus.listenerCount('agent-bus:autopilot:v1'), 0);
   bus.emit('agent-bus:autopilot:v1', { pid: process.pid, cwd: ctx.cwd, session: ctx.sessionManager.getSessionFile(), state: 'off', reason: 'stale' });
   assert.equal(notifications.length, beforeShutdown, 'shutdown retained autopilot listener');
-  await emit("agent_settled", { executionReceipt: {
-    taskId: "task-a", executionId: "execution-a", session: ctx.sessionManager.getSessionFile(), entryId: "shutdown", status: "completed",
-  } });
-  assert.equal(notifications.length, beforeShutdown, "shutdown retained native body");
-  console.log("PASS  native suspension, settled completion/error/abort, retry content and exact execution correlation");
-  console.log("PASS  legacy Parley aggregates still correlated; unmarked aborts and failures notify");
+  console.log("PASS  agent_end notifies once, agent_settled marks Kitty done; unmarked aborts and failures notify");
   console.log("PASS  bus autopilot pulses silent, exact off/waiting events notify; lifecycle listeners cleaned");
   console.log("PASS  bus handoff custom steps suppressed, ordinary bus successor/results notify; no legacy marker listeners");
   await testKittyRestart();
   await testNonTuiPaneIdentity();
   await testVisibility();
-  await testRelocatedSession();
 }
 
 async function testNonTuiPaneIdentity() {

@@ -18,7 +18,7 @@
 import { execFile, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getSessionIdentityPath, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const DISPATCHER = "/home/sr/dev/pi/pi-notify/notify.py";
 const DEFAULT_BODY = "Ready for input";
@@ -96,41 +96,6 @@ function isHandoffTurn(messages: unknown[]): boolean {
 	return false;
 }
 
-function textOnly(content: unknown): string | undefined {
-	if (!Array.isArray(content) || !content.length || content.some((part) =>
-		!part || part.type !== "text" || typeof part.text !== "string")) return undefined;
-	return content.map((part: { text: string }) => part.text).join("");
-}
-
-function emptyParleyCompletion(text: string): boolean {
-	const prefix = "[PARLEY COMPLETE]\n\n";
-	if (!text.startsWith(prefix)) return false;
-	const sections = text.slice(prefix.length).split("\n\n--- ");
-	return sections.length > 0 && sections.every((section, index) =>
-		/^--- [^\r\n]+ state=succeeded ---\n\n$/.test(index === 0 ? section : `--- ${section}`));
-}
-
-function parleyCompletionText(receipt: { taskId: string; executionId: string; inputDeliveryId?: unknown }, ctx: {
-	sessionManager: { getBranch(): unknown[] };
-}): string | undefined {
-	const id = receipt.inputDeliveryId;
-	if (typeof id !== "string" || !/^parley:[^:\s]+:complete$/.test(id)) return undefined;
-	try {
-		const entries = ctx.sessionManager.getBranch();
-		const matching = entries.filter((entry) =>
-			(entry as { type?: unknown; message?: { delivery?: { id?: unknown } } }).type === "message" &&
-			(entry as { message?: { delivery?: { id?: unknown } } }).message?.delivery?.id === id);
-		if (matching.length !== 1) return undefined;
-		const message = (matching[0] as { message?: { role?: unknown; delivery?: { kind?: unknown; execution?: { taskId?: unknown; executionId?: unknown } }; content?: unknown } }).message;
-		if (message?.role !== "user" || message.delivery?.kind !== "parley" ||
-			message.delivery.execution?.taskId !== receipt.taskId ||
-			message.delivery.execution?.executionId !== receipt.executionId) return undefined;
-		return textOnly(message.content);
-	} catch {
-		return undefined;
-	}
-}
-
 function notificationNeedsAttention(event: { aborted?: unknown; messages: unknown[] }): boolean {
 	if (event.aborted === true) return true;
 	for (let i = event.messages.length - 1; i >= 0; i--) {
@@ -138,14 +103,6 @@ function notificationNeedsAttention(event: { aborted?: unknown; messages: unknow
 		if (message?.role === "assistant") return message.stopReason === "error" || message.stopReason === "aborted";
 	}
 	return false;
-}
-
-function executionKey(execution: unknown, session: unknown): string | undefined {
-	const value = execution as { taskId?: unknown; executionId?: unknown } | undefined;
-	if (typeof value?.taskId !== "string" || !value.taskId ||
-		typeof value.executionId !== "string" || !value.executionId ||
-		typeof session !== "string" || !session) return undefined;
-	return JSON.stringify([value.taskId, value.executionId, getSessionIdentityPath(session)]);
 }
 
 /** Resolve an executable on PATH synchronously; null if not found. */
@@ -262,7 +219,6 @@ function setKittySessionFile(isTui: boolean, file: string): Promise<void> {
 
 export default function (pi: ExtensionAPI) {
 	let kittyConfigReloadStarted = false;
-	const pendingExecutions = new Map<string, { body?: string; needsAttention: boolean; completionInput?: string }>();
 	let activeSession: { cwd: string; session: string } | undefined;
 	const stopAutopilotListener = pi.events.on("agent-bus:autopilot:v1", (payload: unknown) => {
 		const event = payload as { pid?: unknown; cwd?: unknown; session?: unknown; state?: unknown; reason?: unknown };
@@ -274,7 +230,6 @@ export default function (pi: ExtensionAPI) {
 		notify(notificationTitle(), body, true);
 	});
 	pi.on("session_start", async (_event, ctx) => {
-		pendingExecutions.clear();
 		activeSession = ctx.mode === "tui" && ctx.sessionManager.getSessionFile()
 			? { cwd: fs.realpathSync(ctx.cwd), session: ctx.sessionManager.getSessionFile()! }
 			: undefined;
@@ -284,34 +239,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (_event, ctx) => setKittyAgentStatus(ctx.mode === "tui", "busy"));
 	pi.on("agent_start", async (_event, ctx) => setKittyAgentStatus(ctx.mode === "tui", "busy"));
 	pi.on("tool_execution_start", async (_event, ctx) => setKittyAgentStatus(ctx.mode === "tui", "busy"));
-	pi.on("agent_settled", async (event, ctx) => {
-		const receipt = (event as { executionReceipt?: {
-			taskId: string; executionId: string; session: string; entryId: string; status: string; inputDeliveryId?: string;
-		} }).executionReceipt;
-		if (receipt) {
-			const key = executionKey(receipt, receipt.session);
-			if (!key || !receipt.entryId || receipt.status === "started") return;
-			if (!["suspended", "completed", "failed", "aborted"].includes(receipt.status)) return;
-			const pending = pendingExecutions.get(key);
-			pendingExecutions.delete(key);
-			if (!pending || key !== executionKey(receipt, ctx.sessionManager.getSessionFile())) return;
-			if (receipt.status !== "suspended" && pending.body !== undefined) {
-				const deliveryText = pending.completionInput ? parleyCompletionText(receipt, ctx) : undefined;
-				const aggregate = deliveryText !== undefined && deliveryText === pending.completionInput;
-				if (!(receipt.status === "completed" && aggregate && deliveryText !== undefined && emptyParleyCompletion(deliveryText))) {
-					const label = aggregate ? "Parley aggregate · " : "";
-					const body = Array.from(label + pending.body).slice(0, MAX_BODY_CHARS).join("");
-					notify(notificationTitle(), body, pending.needsAttention || receipt.status !== "completed");
-				}
-			}
-			if (ctx.isIdle()) await setKittyAgentStatus(ctx.mode === "tui", receipt.status === "suspended" ? "clear" : "done");
-			return;
-		}
-		if (pendingExecutions.size) return;
-		await setKittyAgentStatus(ctx.mode === "tui", "done");
-	});
+	pi.on("agent_settled", async (_event, ctx) => setKittyAgentStatus(ctx.mode === "tui", "done"));
 	pi.on("session_shutdown", async (event, ctx) => {
-		pendingExecutions.clear();
 		activeSession = undefined;
 		stopAutopilotListener();
 		await setKittyAgentStatus(ctx.mode === "tui", "clear");
@@ -331,16 +260,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 	});
-	pi.on("agent_end", async (event, ctx) => {
-		const suppressed = isHandoffTurn(event.messages);
-		const key = executionKey((ctx as { execution?: unknown }).execution, ctx.sessionManager.getSessionFile());
-		if (key) {
-			const users = event.messages.filter((message) => (message as { role?: unknown })?.role === "user");
-			const input = users.length === 1 ? textOnly((users[0] as { content?: unknown }).content) : undefined;
-			pendingExecutions.set(key, { body: suppressed ? undefined : notificationBody(event.messages), needsAttention: notificationNeedsAttention(event),
-				completionInput: input?.startsWith("[PARLEY COMPLETE]\n\n--- ") ? input : undefined });
-			return;
-		}
-		if (!suppressed) notify(notificationTitle(), notificationBody(event.messages), notificationNeedsAttention(event));
+	pi.on("agent_end", async (event) => {
+		if (!isHandoffTurn(event.messages)) notify(notificationTitle(), notificationBody(event.messages), notificationNeedsAttention(event));
 	});
 }
