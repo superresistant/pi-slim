@@ -1,5 +1,7 @@
 # pi-notify-local
 
+Owner: /home/sr/dev/pi/pi-slim (merged Sept25).
+
 Local Pi extension. When the agent finishes a turn, it raises a desktop
 notification titled `Pi · <project>` with a compact summary of the final
 assistant response. `Ready for input` is used only when no final text exists.
