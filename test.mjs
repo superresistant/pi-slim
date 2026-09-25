@@ -448,7 +448,7 @@ test("timestamp and waiting status never add rows and narrow splits retain folde
 		const lines = f.editor.render(width);
 		assert.equal(lines.length, normalHeight);
 		assert.ok(lines.every(line => visibleWidth(line) <= width));
-		assert.ok(stripTerminalSequences(lines[0]).includes("pi-slim"));
+		assert.ok(stripTerminalSequences(lines[0]).includes(process.cwd().split("/").at(-1)));
 		assert.ok(stripTerminalSequences(lines[0]).includes("model"));
 	}
 	assert.ok(statusLine(f, 70).includes("16/09 14:37"));

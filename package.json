@@ -1,5 +1,5 @@
 {
-  "name": "pi-slim",
+  "name": "terminal",
   "version": "0.1.0",
   "description": "Terminal UX for Pi: slim status chrome, desktop notifications, Kitty session save/restore, clipboard cleaning, notes, pp/ppp launcher.",
   "type": "module",
