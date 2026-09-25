@@ -1,0 +1,188 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+auto=0
+if [ "${1:-}" = "--auto" ]; then
+    auto=1
+    shift
+fi
+[ "$#" -eq 0 ] || { echo "usage: kitty-save-session [--auto]" >&2; exit 2; }
+
+listen_on="${KITTY_LISTEN_ON:-}"
+if [ -z "$listen_on" ]; then
+    sockets=()
+    shopt -s nullglob
+    for socket in /tmp/kitty-*; do
+        [ -S "$socket" ] || continue
+        [ "$(stat -c %u "$socket" 2>/dev/null || true)" = "$(id -u)" ] || continue
+        pid=${socket##*-}
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        [ "$(basename "$(readlink "/proc/$pid/exe" 2>/dev/null || true)")" = kitty ] || continue
+        sockets+=("unix:$socket")
+    done
+    if [ "${#sockets[@]}" -eq 0 ]; then
+        [ "$auto" -eq 1 ] && exit 0
+        echo "no running Kitty instance found" >&2
+        exit 1
+    fi
+    if [ "${#sockets[@]}" -ne 1 ]; then
+        echo "multiple Kitty instances found; session autosave skipped" >&2
+        [ "$auto" -eq 1 ] && exit 0
+        exit 1
+    fi
+    listen_on=${sockets[0]}
+fi
+
+session="$HOME/.config/kitty/last-session.kitty"
+mkdir -p "${session%/*}"
+exec 9>"$session.lock"
+if [ "$auto" -eq 1 ]; then
+    flock -n 9 || exit 0
+else
+    flock 9
+fi
+
+tmp=$(mktemp "${session%/*}/.last-session.tmp.XXXXXX.kitty-session")
+trap 'rm -f "$tmp"' EXIT
+kitty @ --to "$listen_on" action save_as_session --save-only --use-foreground-process "$tmp"
+if ! python3 - "$tmp" "$listen_on" <<'PY'
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+DROP_ENV = {
+    "PI_HANDOFF_INBOX_ONBOARDING",
+    "PI_ANCHOR_GUIDE",
+    "PI_ANCHOR_GUIDE_PID",
+    "PI_ANCHOR_GUIDE_CWD",
+    "PI_ANCHOR_GUIDE_SESSION",
+    "PI_ANCHOR_HANDOFF",
+    "PI_ANCHOR_CONTINUE_SHA256",
+    "PI_ANCHOR_FEEDBACK_SESSION",
+    "PI_ANCHOR_ACTIVE",
+    "PI_ANCHOR_RUNNER_PID",
+    "HANDOFF_PI_MODEL",
+    "HANDOFF_CHAIN_MODEL",
+    "PI_BUS_HANDOFF",
+    "PI_BUS_SESSION",
+    "PI_BUS_CWD",
+}
+DROP_VAR = {"pi_session", "pi_state"}
+def read_windows():
+    try:
+        result = subprocess.run(
+            ["kitty", "@", "--to", sys.argv[2], "ls"],
+            check=True, capture_output=True, text=True, timeout=3,
+        )
+        state = json.loads(result.stdout)
+        windows = {}
+        for os_window in state:
+            for tab in os_window.get("tabs", []):
+                for window in tab.get("windows", []):
+                    window_id = window["id"]
+                    windows[window_id] = None if window_id in windows else window
+        return windows
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
+        return {}
+
+windows = read_windows()
+identity_deadline = time.monotonic() + 10
+
+def foreground_session(window_id):
+    window = windows.get(window_id)
+    if not window:
+        return "", ""
+    candidates = {}
+    for process in window.get("foreground_processes", []):
+        pid = process.get("pid")
+        if type(pid) is int and pid > 0:
+            control = Path(f"/tmp/pi-ctl-{os.getuid()}/{pid}.sock")
+            if control.is_socket():
+                candidates[pid] = (process.get("cwd"), control)
+    if len(candidates) != 1:
+        return "", ""
+    pid, (cwd, control) = next(iter(candidates.items()))
+    remaining = identity_deadline - time.monotonic()
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or remaining <= 0:
+        return "", ""
+    try:
+        result = subprocess.run(
+            ["pi-ctl", "status", str(control)],
+            check=True, capture_output=True, text=True, timeout=min(1, remaining),
+        )
+        status = json.loads(result.stdout)
+        session = status.get("session")
+        live_cwd = status.get("cwd")
+        if (type(status.get("pid")) is int and status["pid"] == pid
+                and isinstance(live_cwd, str) and os.path.isabs(live_cwd)
+                and os.path.realpath(live_cwd) == os.path.realpath(cwd)
+                and isinstance(session, str) and os.path.isabs(session)
+                and Path(session).is_file()):
+            return session, live_cwd
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+        pass
+    return "", ""
+
+def rewrite_launch(line):
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        return line
+    drop = set()
+    window_ids = []
+    for index, token in enumerate(tokens[1:], 1):
+        if not token.startswith(("--", "kitty-unserialize-data=")):
+            break
+        if token.startswith("--env=") and token[len("--env="):].split("=", 1)[0] in DROP_ENV:
+            drop.add(index)
+        if token.startswith("--var=") and token[len("--var="):].split("=", 1)[0] in DROP_VAR:
+            drop.add(index)
+        if token.startswith("kitty-unserialize-data="):
+            try:
+                data = json.loads(token.split("=", 1)[1])
+                window_ids.append(data.get("id") if isinstance(data, dict) else None)
+            except ValueError:
+                window_ids.append(None)
+    if drop:
+        tokens = [token for index, token in enumerate(tokens) if index not in drop]
+        line = " ".join(shlex.quote(token) for token in tokens)
+    session, cwd = foreground_session(window_ids[0]) if len(window_ids) == 1 and type(window_ids[0]) is int and window_ids[0] > 0 else ("", "")
+    if not session:
+        return line
+    out = ["launch"]
+    for token in tokens[1:]:
+        if token.startswith("kitty-unserialize-data="):
+            try:
+                data = json.loads(token.split("=", 1)[1])
+            except ValueError:
+                out.append(token)
+                continue
+            data.pop("cmd_at_shell_startup", None)
+            out.append("kitty-unserialize-data=" + json.dumps(data))
+            continue
+        if not token.startswith("--"):
+            break
+        out.append(token)
+    out += ["/usr/bin/pi", "--session", session]
+    return " ".join(shlex.quote(token) for token in out)
+
+path = Path(sys.argv[1])
+lines = path.read_text().split("\n")
+for index, line in enumerate(lines):
+    if line.startswith("launch "):
+        lines[index] = rewrite_launch(line)
+path.write_text("\n".join(lines))
+PY
+then
+    [ "$auto" -eq 1 ] && exit 0
+    exit 1
+fi
+[ ! -f "$session" ] || cp -p "$session" "$session.bak"
+mv -f "$tmp" "$session"
+trap - EXIT
+[ "$auto" -eq 1 ] || notify-send -i kitty -t 2000 "Kitty" "Session saved" || true

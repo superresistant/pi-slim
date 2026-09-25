@@ -1,0 +1,26 @@
+.compact-notifications {
+    spacing: 6px;
+}
+
+.compact-notifications .message .message-header {
+    margin: 4px 4px 0;
+    padding: 0 6px;
+    spacing: 4px;
+}
+
+.compact-notifications .message .message-header .message-header-content {
+    min-height: 0;
+    padding-bottom: 0;
+    spacing: 6px;
+}
+
+.compact-notifications .message .message-header .message-expand-button,
+.compact-notifications .message .message-header .message-close-button {
+    padding: 3px;
+    margin: 0;
+}
+
+.compact-notifications .message .message-box {
+    margin: 0;
+    padding: 4px 10px 6px;
+}
