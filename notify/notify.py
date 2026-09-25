@@ -195,7 +195,6 @@ def send_desktop(title: str, body: str) -> bool:
                 return False
             id_path.write_text(returned_id + "\n")
 
-        run_sound()
         remaining, _ = process.communicate()
         if "default" in remaining.splitlines():
             focus_source()
@@ -204,23 +203,6 @@ def send_desktop(title: str, body: str) -> bool:
         if process is not None and process.poll() is None:
             process.kill()
         return False
-
-
-def run_sound() -> None:
-    command = os.environ.get("PI_NOTIFY_SOUND_CMD", "").strip()
-    if not command:
-        return
-    try:
-        subprocess.Popen(
-            command,
-            shell=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError:
-        pass
 
 
 def send(title: str, body: str, completion: bool = False) -> int:
@@ -248,20 +230,10 @@ def toggle() -> int:
         else:
             marker.touch(mode=0o600)
             state = "muted"
-        if os.environ.get("PI_NOTIFY_TOGGLE_QUIET") != "1":
-            send_feedback(f"{state.capitalize()} for this Kitty tab")
+        send_feedback(f"{state.capitalize()} for this Kitty tab")
         return 0
     except (KeyError, ValueError, json.JSONDecodeError, OSError, subprocess.SubprocessError):
         send_feedback("Could not toggle this Kitty tab")
-        return 1
-
-
-def status() -> int:
-    try:
-        print("muted" if is_muted() else "enabled")
-        return 0
-    except (KeyError, ValueError, json.JSONDecodeError, OSError, subprocess.SubprocessError):
-        print("unknown")
         return 1
 
 
@@ -314,8 +286,6 @@ def main(argv: list[str]) -> int:
         return send(title, body, completion="--completion" in argv[4:])
     if command == "toggle":
         return toggle()
-    if command == "status":
-        return status()
     if command == "agent-status":
         value = argv[2] if len(argv) > 2 else ""
         return set_agent_status(value)

@@ -1,0 +1,48 @@
+#!/bin/bash
+# Smart paste from Kitty right-click or Ctrl+V:
+#   image in clipboard → forward Ctrl+V to the originating application
+#   text in clipboard  → run clipclean synchronously, then paste into the
+#                        exact originating Kitty pane
+#
+# The synchronous clipclean call closes the ~500ms race window left by the
+# clipclean watch daemon when text is pasted immediately after selection.
+set -euo pipefail
+
+socket=${KITTY_LISTEN_ON:-}
+if [[ -z "$socket" ]]; then
+    sock_path=
+    for candidate in /tmp/kitty-*; do
+        [[ -S "$candidate" ]] || continue
+        if [[ -z "$sock_path" || "$candidate" -nt "$sock_path" ]]; then
+            sock_path=$candidate
+        fi
+    done
+    if [[ -z "$sock_path" ]]; then
+        echo "kitty-paste: no kitty control socket in /tmp" >&2
+        exit 1
+    fi
+    socket="unix:$sock_path"
+fi
+
+target=()
+if [[ ${KITTY_WINDOW_ID:-} =~ ^[0-9]+$ ]]; then
+    target=(--match "id:$KITTY_WINDOW_ID")
+fi
+
+clipboard_targets=$(xclip -selection clipboard -t TARGETS -o 2>/dev/null || true)
+if grep -qE 'image/(png|jpeg|webp|gif)' <<<"$clipboard_targets"; then
+    kitten @ --to "$socket" send-key "${target[@]}" ctrl+v
+else
+    # Sync-clean clipboard before pasting. Idempotent: clipclean is a no-op
+    # if the text isn't TUI-mangled. Quiet to avoid notification on every
+    # paste. Failure is non-fatal — fall through to a normal paste.
+    clipclean -q >/dev/null 2>&1 || true
+    paste_file=$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/kitty-paste.XXXXXX")
+    trap 'rm -f "$paste_file"' EXIT
+    xclip -selection clipboard -t UTF8_STRING -o > "$paste_file"
+    {
+        printf '\033[200~'
+        cat "$paste_file"
+        printf '\033[201~'
+    } | kitten @ --to "$socket" send-text "${target[@]}" --stdin --bracketed-paste disable
+fi

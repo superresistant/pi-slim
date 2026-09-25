@@ -6,7 +6,7 @@ const { EventEmitter } = require("node:events");
 const os = require("node:os");
 const path = require("node:path");
 const childProcess = require("node:child_process");
-const ts = require(path.join(os.homedir(), "dev/pi/agent-bus/node_modules/typescript"));
+const ts = require(path.join(os.homedir(), "dev/pi/pi-local/node_modules/typescript"));
 
 const root = path.resolve(__dirname, "..");
 function loadExtension(sourcePath) {

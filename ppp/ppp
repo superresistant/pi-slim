@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path.home() / ".pi" / "agent" / "sessions"
+INDEX = Path.home() / ".pi" / "agent" / "session-index.json"
+RG = Path.home() / ".pi" / "agent" / "bin" / "rg"
+
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(x.get("text", "") for x in content if isinstance(x, dict))
+    return ""
+
+
+def clean(text):
+    text = re.sub(r"^\s*(?:<skill\b[^\n]*>.*?^</skill>\s*)+", "", text, flags=re.S | re.M)
+    return " ".join(text.split())
+
+
+def is_handoff(text):
+    return bool(re.match(r"^\[HANDOFF-FLOW(?:-NEW)?-[^]]+\]", clean(text)))
+
+
+def session_summary(path):
+    cwd = ""
+    timestamp = ""
+    try:
+        with open(path, errors="replace") as f:
+            for _ in range(100):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if item.get("type") == "session":
+                    cwd = item.get("cwd", cwd)
+                    timestamp = item.get("timestamp", timestamp)
+                elif item.get("type") == "message":
+                    message = item.get("message", {})
+                    if message.get("role") == "user":
+                        title = clean(text_of(message.get("content")))
+                        if title and not is_handoff(title):
+                            return cwd, timestamp, title
+    except OSError:
+        pass
+    return cwd, timestamp, "Untitled session"
+
+
+def session_index():
+    try:
+        entries = json.loads(INDEX.read_text()).get("entries", {})
+        return {path: entry.get("info", {}) for path, entry in entries.items()}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def display_time(timestamp):
+    if len(timestamp) >= 16:
+        return f"{timestamp[8:10]}/{timestamp[5:7]}/{timestamp[2:4]} {timestamp[11:16]}"
+    return timestamp
+
+
+def inspect(path):
+    cwd = ""
+    timestamp = ""
+    name = ""
+    messages = []
+    with open(path, errors="replace") as f:
+        for line in f:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if item.get("type") == "session":
+                cwd = item.get("cwd", cwd)
+                timestamp = item.get("timestamp", timestamp)
+            elif item.get("type") == "session_info" and item.get("name"):
+                name = item["name"]
+            elif item.get("type") == "message":
+                message = item.get("message", {})
+                role = message.get("role", "")
+                text = text_of(message.get("content"))
+                if text:
+                    messages.append((role, text))
+    first = next((clean(text) for role, text in messages if role == "user" and clean(text)), "Untitled session")
+    return cwd, timestamp, name or first, messages
+
+
+def short(text, length=110):
+    text = clean(text).replace("\t", " ")
+    return text if len(text) <= length else text[: length - 1] + "…"
+
+
+def preview(path, query):
+    cwd, timestamp, title, messages = inspect(path)
+    print(short(title, 160))
+    print(f"{timestamp[:19]}  {cwd}")
+    print()
+    shown = 0
+    for role, text in messages:
+        if role in {"user", "assistant"} and query in text:
+            print(f"{role}: {short(text, 700)}\n")
+            shown += 1
+            if shown == 8:
+                break
+    if not shown:
+        print("Match is outside conversational messages.")
+
+
+def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "--preview":
+        preview(sys.argv[2], sys.argv[3])
+        return 0
+    if len(sys.argv) < 2:
+        print("Usage: ppp <exact session text>", file=sys.stderr)
+        return 2
+    query = " ".join(sys.argv[1:])
+    result = subprocess.run(
+        [str(RG), "-l", "-F", "--", query, str(ROOT)],
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    paths = [Path(x) for x in result.stdout.splitlines()]
+    if not paths:
+        print(f"No Pi session contains: {query}", file=sys.stderr)
+        return 1
+    paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    rows = []
+    metadata = {}
+    index = session_index()
+    for path in paths:
+        info = index.get(str(path), {})
+        cwd = info.get("cwd", "")
+        timestamp = info.get("created", "")
+        title = info.get("name") or clean(info.get("firstMessage", ""))
+        if not cwd or not timestamp or not title or is_handoff(title):
+            fallback_cwd, fallback_timestamp, fallback_title = session_summary(path)
+            cwd = cwd or fallback_cwd
+            timestamp = timestamp or fallback_timestamp
+            if not title or is_handoff(title):
+                title = fallback_title
+        metadata[str(path)] = cwd
+        display_cwd = cwd.replace(str(Path.home()), "~", 1)
+        rows.append((str(path), display_time(timestamp), display_cwd, short(title)))
+    cwd_width = max(len(row[2]) for row in rows)
+    rows = [f"{path}\t{timestamp}  {cwd:<{cwd_width}}  {title}" for path, timestamp, cwd, title in rows]
+    command = [
+        "fzf",
+        "--delimiter=\\t",
+        "--with-nth=2..",
+        "--layout=reverse",
+        "--height=80%",
+        f"--prompt=Pi sessions ({len(rows)}) > ",
+        "--preview-window=down,60%,wrap,border-none",
+        "--preview",
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__)))} --preview {{1}} {shlex.quote(query)}",
+    ]
+    picked = subprocess.run(command, input="\n".join(rows) + "\n", text=True, stdout=subprocess.PIPE)
+    if picked.returncode != 0 or not picked.stdout:
+        return 130
+    path = picked.stdout.split("\t", 1)[0]
+    cwd = metadata.get(path, "")
+    if cwd and os.path.isdir(cwd):
+        os.chdir(cwd)
+    os.execvp("parley-remote", ["parley-remote", "--open-local", os.getcwd(), "--session", path])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

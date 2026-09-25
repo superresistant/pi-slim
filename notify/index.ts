@@ -1,26 +1,12 @@
-/**
- * pi-notify-local
- *
- * Fires a desktop notification when the Pi agent finishes a turn and is ready
- * for input again ("Ready for input").
- *
- * Why this exists: the previous notifier wrote raw OSC notification escape
- * sequences straight into the shared TUI stdout. On kitty those bytes race
- * with Pi's own renderer (SGR resets, OSC-8 hyperlinks) and corrupt the
- * notification body, e.g. "Ready \e[49m\e[0m8;;" instead of "Ready for input".
- *
- * The fix: emit every completion event to a detached local dispatcher. The
- * dispatcher owns Kitty-tab mute state and calls `notify-send` only when the
- * source tab is enabled. Pi never writes notification bytes into TUI stdout.
- * Terminal OSC remains only as a fallback without a desktop notification path.
- */
-
+// Pi never writes notification bytes to TUI stdout: a detached dispatcher owns
+// Kitty-tab mute state, focus suppression and notify-send.
 import { execFile, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const DISPATCHER = "/home/sr/dev/pi/pi-notify/notify.py";
+const DISPATCHER = path.join(path.dirname(fs.realpathSync(fileURLToPath(import.meta.url))), "notify.py");
 const DEFAULT_BODY = "Ready for input";
 const MAX_BODY_CHARS = 240;
 
@@ -105,115 +91,18 @@ function notificationNeedsAttention(event: { aborted?: unknown; messages: unknow
 	return false;
 }
 
-/** Resolve an executable on PATH synchronously; null if not found. */
-function resolveOnPath(bin: string): string | null {
-	if (process.platform === "win32") return null;
-	const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-	for (const dir of dirs) {
-		const full = path.join(dir, bin);
-		try {
-			fs.accessSync(full, fs.constants.X_OK);
-			return full;
-		} catch {
-			/* not here, keep looking */
-		}
-	}
-	return null;
-}
-
-/**
- * Path to `notify-send` when a desktop session is present, else null. This is
- * checked before we commit to the desktop path so a missing binary falls back
- * to OSC instead of silently dropping the notification.
- */
-function notifySendPath(): string | null {
-	if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return null;
-	return resolveOnPath("notify-send");
-}
-
-/**
- * Primary path: every event reaches the notification-side dispatcher. It maps
- * KITTY_WINDOW_ID to a Kitty tab, checks the shared tab mute marker, then sends
- * through libnotify and runs the optional sound only when not muted.
- */
-function notifyViaDispatcher(title: string, body: string, needsAttention: boolean): boolean {
-	if (!notifySendPath()) return false;
-	try {
-		fs.accessSync(DISPATCHER, fs.constants.X_OK);
-		const child = spawn(DISPATCHER, ["send", title, body, ...(needsAttention ? [] : ["--completion"])], {
-			detached: true,
-			stdio: "ignore",
-		});
-		child.on("error", () => {
-			/* helper disappeared after the access check; best-effort */
-		});
-		child.unref();
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/** tmux passthrough: only wrap when inside tmux, and only for OSC output. */
-function wrapForTmux(sequence: string): string {
-	if (!process.env.TMUX) return sequence;
-	const escaped = sequence.split("\x1b").join("\x1b\x1b");
-	return `\x1bPtmux;${escaped}\x1b\\`;
-}
-
-/** Last fallback when no desktop notification path is available. */
-function notifyOSC(title: string, body: string): void {
-	const t = stripControl(title);
-	const b = stripControl(body);
-	const isIterm2 =
-		process.env.TERM_PROGRAM === "iTerm.app" ||
-		Boolean(process.env.ITERM_SESSION_ID);
-	const inner = isIterm2
-		? `\x1b]9;${t}: ${b}\x07`
-		: `\x1b]777;notify;${t};${b}\x07`;
-	try {
-		fs.writeFileSync(process.stdout.fd, wrapForTmux(inner));
-	} catch {
-		/* notification is best-effort */
-	}
-}
-
-/** Optional cross-platform sound hook via PI_NOTIFY_SOUND_CMD. */
-function runSoundHook(): void {
-	const command = process.env.PI_NOTIFY_SOUND_CMD?.trim();
-	if (!command) return;
-	try {
-		const child = spawn(command, {
-			shell: true,
-			detached: true,
-			stdio: "ignore",
-		});
-		child.on("error", () => {
-			/* swallow: sound is best-effort */
-		});
-		child.unref();
-	} catch {
-		/* swallow: never break notifications over a sound hook */
-	}
-}
-
 function notify(title: string, body: string, needsAttention: boolean): void {
-	if (notifyViaDispatcher(title, body, needsAttention)) return;
-	notifyOSC(title, body);
-	runSoundHook();
+	try {
+		const child = spawn(DISPATCHER, ["send", title, body, ...(needsAttention ? [] : ["--completion"])], { detached: true, stdio: "ignore" });
+		child.on("error", () => {});
+		child.unref();
+	} catch {}
 }
 
-function setKittyAgentStatus(isTui: boolean, status: "busy" | "done" | "clear"): Promise<void> {
+function setKittyVar(isTui: boolean, ...args: string[]): Promise<void> {
 	if (!isTui) return Promise.resolve();
 	return new Promise((resolve) => {
-		execFile(DISPATCHER, ["agent-status", status], { timeout: 1500 }, () => resolve());
-	});
-}
-
-function setKittySessionFile(isTui: boolean, file: string): Promise<void> {
-	if (!isTui) return Promise.resolve();
-	return new Promise((resolve) => {
-		execFile(DISPATCHER, ["session-file", file], { timeout: 1500 }, () => resolve());
+		execFile(DISPATCHER, args, { timeout: 1500 }, () => resolve());
 	});
 }
 
@@ -233,18 +122,18 @@ export default function (pi: ExtensionAPI) {
 		activeSession = ctx.mode === "tui" && ctx.sessionManager.getSessionFile()
 			? { cwd: fs.realpathSync(ctx.cwd), session: ctx.sessionManager.getSessionFile()! }
 			: undefined;
-		await setKittyAgentStatus(ctx.mode === "tui", "clear");
-		await setKittySessionFile(ctx.mode === "tui", ctx.sessionManager.getSessionFile() ?? "");
+		await setKittyVar(ctx.mode === "tui", "agent-status", "clear");
+		await setKittyVar(ctx.mode === "tui", "session-file", ctx.sessionManager.getSessionFile() ?? "");
 	});
-	pi.on("before_agent_start", async (_event, ctx) => setKittyAgentStatus(ctx.mode === "tui", "busy"));
-	pi.on("agent_start", async (_event, ctx) => setKittyAgentStatus(ctx.mode === "tui", "busy"));
-	pi.on("tool_execution_start", async (_event, ctx) => setKittyAgentStatus(ctx.mode === "tui", "busy"));
-	pi.on("agent_settled", async (_event, ctx) => setKittyAgentStatus(ctx.mode === "tui", "done"));
+	pi.on("before_agent_start", async (_event, ctx) => setKittyVar(ctx.mode === "tui", "agent-status", "busy"));
+	pi.on("agent_start", async (_event, ctx) => setKittyVar(ctx.mode === "tui", "agent-status", "busy"));
+	pi.on("tool_execution_start", async (_event, ctx) => setKittyVar(ctx.mode === "tui", "agent-status", "busy"));
+	pi.on("agent_settled", async (_event, ctx) => setKittyVar(ctx.mode === "tui", "agent-status", "done"));
 	pi.on("session_shutdown", async (event, ctx) => {
 		activeSession = undefined;
 		stopAutopilotListener();
-		await setKittyAgentStatus(ctx.mode === "tui", "clear");
-		await setKittySessionFile(ctx.mode === "tui", "");
+		await setKittyVar(ctx.mode === "tui", "agent-status", "clear");
+		await setKittyVar(ctx.mode === "tui", "session-file", "");
 		const socket = process.env.KITTY_LISTEN_ON;
 		if (ctx.mode === "tui" && (event.reason as string) === "restart" && socket && !kittyConfigReloadStarted) {
 			kittyConfigReloadStarted = true;
