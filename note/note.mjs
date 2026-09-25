@@ -75,7 +75,7 @@ export async function main() {
     help: { type: 'boolean' },
   } });
   if (values.help) {
-    console.log('pi-note [--cwd PATH] [--session SESSION_FILE]\nStandalone Pi editor. Enter: newline. Ctrl+Q: save and close. Autosaves to ~/.local/share/pi-notes.');
+    console.log('note [--cwd PATH] [--session SESSION_FILE]\nStandalone Pi editor. Enter: newline. Ctrl+Q: save and close. Autosaves to ~/.local/share/pi-notes.');
     return;
   }
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Notes requires a terminal');
@@ -153,5 +153,5 @@ export async function main() {
 }
 
 if (process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url) {
-  main().catch(error => { console.error(`pi-note: ${error.message}`); process.exitCode = 1; });
+  main().catch(error => { console.error(`note: ${error.message}`); process.exitCode = 1; });
 }
