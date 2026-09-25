@@ -1,0 +1,7 @@
+{
+  "uuid": "notification-limit@pi-notify.local",
+  "name": "Compact Notification History",
+  "description": "Keep at most 10 notifications across applications, with compact cards and up to six body lines visible by default.",
+  "shell-version": ["46"],
+  "version": 1
+}
