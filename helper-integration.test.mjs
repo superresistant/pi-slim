@@ -39,7 +39,7 @@ test("isolated agent-bus emits unresolved peer state consumed by slim without ol
 	const ctx = {
 		mode: "tui", cwd, model: { id: "model" }, isIdle: () => true, hasPendingMessages: () => false,
 		getContextUsage: () => ({ percent: 12, tokens: 6000 }),
-		sessionManager: { getSessionFile: () => session, getEntries: () => entries, getBranch: () => entries, getEntry: () => undefined },
+		sessionManager: { getSessionFile: () => session, getEntries: () => entries, getBranch: () => entries },
 		ui: {
 			theme, setWorkingVisible() {}, notify() {},
 			setFooter: factory => factory?.(tui, theme, { getExtensionStatuses: () => new Map(), getGitBranch: () => null, onBranchChange: () => () => {} }),

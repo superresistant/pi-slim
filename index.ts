@@ -188,11 +188,9 @@ export default function (pi: ExtensionAPI) {
 		activeTui?.requestRender();
 	});
 
-	pi.on("agent_settled", (event, ctx) => {
+	pi.on("agent_settled", (_event, ctx) => {
 		if (isWorking) {
-			const entry = event.executionReceipt ? ctx.sessionManager.getEntry(event.executionReceipt.entryId) : undefined;
-			const at = entry ? Date.parse(entry.timestamp) : NaN;
-			lastStopped = Number.isFinite(at) ? at : Date.now();
+			lastStopped = Date.now();
 			pi.appendEntry("pi-slim.stopped", { at: lastStopped });
 		}
 		isWorking = !ctx.isIdle();
@@ -232,10 +230,7 @@ export default function (pi: ExtensionAPI) {
 		waitingReason = "";
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (entry.type !== "custom") continue;
-			const data = entry.data as { at?: number; kind?: string; status?: string } | undefined;
-			const at = entry.customType === "pi-slim.stopped" ? data?.at
-				: entry.customType === "pi.execution.v1" && data?.kind === "execution" &&
-					["completed", "failed", "aborted", "suspended"].includes(data.status ?? "") ? Date.parse(entry.timestamp) : undefined;
+			const at = entry.customType === "pi-slim.stopped" ? (entry.data as { at?: number } | undefined)?.at : undefined;
 			if (typeof at === "number" && Number.isFinite(at) && (lastStopped === undefined || at > lastStopped)) lastStopped = at;
 		}
 		isWorking = !ctx.isIdle();

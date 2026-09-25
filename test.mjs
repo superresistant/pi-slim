@@ -56,7 +56,6 @@ function fixture(cwd, options = {}) {
 			getSessionFile: () => options.session ?? "/tmp/pi-slim-test-session.jsonl",
 			getSessionId: () => options.sessionId ?? "00000000-0000-4000-8000-000000000001",
 			getEntries: () => entries,
-			getEntry: (id) => entries.find(entry => entry.id === id),
 		},
 		ui: {
 			theme,
@@ -521,16 +520,10 @@ test("last stopped time is local, restored, and unaffected by drafts or bus stat
 	assert.equal(f.entries.length, 2);
 });
 
-test("fresh panes do not invent a timestamp; persisted execution stops support older sessions", () => {
+test("fresh panes do not invent a timestamp", () => {
 	const fresh = fixture(process.cwd());
 	assert.equal(/\d{2}\/\d{2} \d{1,2}:\d{2}/.test(statusLine(fresh)), false);
 	assert.equal(fresh.entries.length, 0);
-	const restored = fixture(process.cwd(), { entries: [
-		{ type: "custom", customType: "pi.execution.v1", timestamp: new Date(stoppedAt).toISOString(), data: { kind: "execution", status: "suspended" } },
-		{ type: "message", timestamp: new Date(stoppedAt + 60000).toISOString(), message: { role: "user" } },
-	] });
-	assert.ok(statusLine(restored).includes("16/09 14:37"));
-	assert.equal(restored.entries.length, 2);
 });
 
 test("bus peer labels clear on replies and stay hidden while working", () => {
