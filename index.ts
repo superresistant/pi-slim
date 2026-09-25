@@ -2,7 +2,6 @@
 
 import { realpathSync } from "node:fs";
 import { basename } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	CustomEditor,
 	type ExtensionAPI,
@@ -11,26 +10,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import * as piSdk from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
-import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
-type Target = { pid: number; cwd: string; session: string };
-type PendingRound = { origin: Target; taskId: string; executionId: string; roundId: string; aggregateId: string };
-type WakeSnapshot = { owner: Target; known: boolean; pending: { run: string; mode: "observe" | "launch" }[] };
-type WakeAdapter = {
-	pendingWakes(owner: Target): Promise<WakeSnapshot>;
-	watchPendingWakes(callback: () => void, owner: Target): () => void;
-	hasLivePendingWake(snapshot: WakeSnapshot): boolean;
-};
-type WakeScope = { owner: Target; adapter?: WakeAdapter; snapshot?: WakeSnapshot; dispose?: () => void; refreshing: boolean; dirty: boolean };
-type IntentEditor = CustomEditor & { submit?: (options?: { submitIntent: "submit" | "followUp"; submitContext?: unknown }) => void };
-type DeliveryState = {
-	version: 1;
-	available: boolean;
-	target?: Target;
-	phase?: string;
-	frozen?: boolean;
-	pendingRound?: PendingRound | null;
-	deferredCount?: number;
+type BusState = {
+	pid: number;
+	cwd: string;
+	session: string;
+	awaitingReplies: number;
+	awaitingPeers: string[];
 };
 
 type StatusSegment = { text: string; drop: number };
@@ -109,10 +96,8 @@ export default function (pi: ExtensionAPI) {
 	let spinnerTimer: ReturnType<typeof setInterval> | undefined;
 	let activeTui: TUI | undefined;
 	let activeContext: ExtensionContext | undefined;
-	let pendingRound: PendingRound | null = null;
 	let lastStopped: number | undefined;
 	let waitingReason = "";
-	let wakeScope: WakeScope | undefined;
 	let cacheStatus = "";
 	let cacheTimer: ReturnType<typeof setInterval> | undefined;
 	let cacheGeneration = 0;
@@ -176,109 +161,21 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function refreshPendingRound() {
-		pendingRound = null;
-		if (activeContext) {
-			const state: DeliveryState = { version: 1, available: false };
-			try {
-				pi.events.emit("pi-handoff-queue:delivery-state:v1", state);
-				const session = activeContext.sessionManager.getSessionFile();
-				if (state.available && !state.frozen && state.phase === "ready" && session &&
-					state.target?.pid === process.pid && state.target.cwd === realpathSync(activeContext.cwd) &&
-					state.target.session === session && Number.isSafeInteger(state.deferredCount) && state.deferredCount! >= 0) {
-					pendingRound = state.pendingRound ?? null;
-				}
-			} catch {
-				pendingRound = null;
-			}
-		}
-		activeTui?.requestRender();
-	}
-
-	function stopWakeStatus() {
-		const previous = wakeScope;
-		wakeScope = undefined;
-		previous?.dispose?.();
-	}
-
-	function refreshWakes(scope: WakeScope) {
-		if (wakeScope !== scope || !scope.adapter) return;
-		scope.snapshot = undefined;
-		scope.dirty = true;
-		activeTui?.requestRender();
-		if (scope.refreshing) return;
-		scope.refreshing = true;
-		void (async () => {
-			for (let pass = 0; pass < 2 && wakeScope === scope && scope.dirty; pass++) {
-				scope.dirty = false;
-				let snapshot: WakeSnapshot | undefined;
-				try { snapshot = await scope.adapter!.pendingWakes(scope.owner); } catch { snapshot = undefined; }
-				if (wakeScope !== scope || scope.dirty) continue;
-				if (snapshot?.owner.pid === scope.owner.pid && snapshot.owner.cwd === scope.owner.cwd && snapshot.owner.session === scope.owner.session) {
-					scope.snapshot = snapshot;
-				}
-				activeTui?.requestRender();
-			}
-		})().finally(() => {
-			scope.refreshing = false;
-			// A dirty trailing result stays hidden until a new lifecycle event.
-			scope.dirty = false;
-		});
-	}
-
-	async function startWakeStatus(ctx: ExtensionContext) {
-		stopWakeStatus();
-		if (ctx.mode !== "tui") return;
+	pi.events.on("agent-bus:state:v1", (event: unknown) => {
+		const ctx = activeContext;
+		if (!ctx || ctx.mode !== "tui") return;
+		const state = event as Partial<BusState> | undefined;
 		const session = ctx.sessionManager.getSessionFile();
-		if (!session) return;
-		let scope: WakeScope | undefined;
-		try {
-			scope = { owner: { pid: process.pid, cwd: realpathSync(ctx.cwd), session }, refreshing: false, dirty: false };
-			wakeScope = scope;
-			const source = pathToFileURL(realpathSync(fileURLToPath(import.meta.url)));
-			const adapter: WakeAdapter = await import(new URL("../subagent/pending-wakes.ts", source).href);
-			if (wakeScope !== scope) return;
-			scope.adapter = adapter;
-			const current = scope;
-			scope.dispose = adapter.watchPendingWakes(() => refreshWakes(current), scope.owner);
-			refreshWakes(scope);
-		} catch {
-			if (wakeScope === scope) stopWakeStatus();
+		if (!state || state.pid !== process.pid || state.cwd !== realpathSync(ctx.cwd) || !session || state.session !== session ||
+			!Number.isSafeInteger(state.awaitingReplies) || state.awaitingReplies! < 0 || !Array.isArray(state.awaitingPeers)) return;
+		const peers = state.awaitingPeers.filter((path): path is string => typeof path === "string" && path.length > 0);
+		const names = [...new Set(peers.map(path => basename(path)))];
+		const reason = !state.awaitingReplies ? "" : names.length ? `parley with ${names.join(" ")}` : "waiting for reply";
+		if (reason !== waitingReason) {
+			waitingReason = reason;
+			activeTui?.requestRender();
 		}
-	}
-
-	function helperIsWaiting(): boolean {
-		const scope = wakeScope;
-		if (!scope?.snapshot?.known || !scope.snapshot.pending.length || !scope.adapter) return false;
-		try { return scope.adapter.hasLivePendingWake(scope.snapshot); } catch { return false; }
-	}
-
-	function refreshWaiting() {
-		waitingReason = "";
-		try {
-			const session = activeContext?.sessionManager.getSessionFile();
-			if (session && activeContext) {
-				const request: { version: 1; handled: boolean; expected: Target; pendingRound?: PendingRound | null; peers?: { folder: string; host?: string }[] } = {
-					version: 1, handled: false, expected: { pid: process.pid, cwd: realpathSync(activeContext.cwd), session },
-				};
-				pi.events.emit("parley:pending-round:v1", request);
-				if (request.handled && request.pendingRound) {
-					const names = request.peers?.map(peer => `${peer.host ? `${peer.host}:` : ""}${basename(peer.folder)}`);
-					waitingReason = names?.length ? `parley with ${names.join(" ")}` : "waiting for wake";
-				}
-			}
-		} catch {
-			waitingReason = "";
-		}
-		activeTui?.requestRender();
-	}
-
-	pi.events.on("pi-handoff-queue:changed:v1", (event: unknown) => {
-		if ((event as { version?: number })?.version !== 1) return;
-		refreshPendingRound();
-		if (wakeScope) refreshWakes(wakeScope);
 	});
-	pi.events.on("parley:pending-round-changed:v1", refreshWaiting);
 
 	pi.on("agent_start", () => {
 		isWorking = true;
@@ -300,7 +197,6 @@ export default function (pi: ExtensionAPI) {
 		}
 		isWorking = !ctx.isIdle();
 		if (!isWorking) stopSpinner();
-		refreshWaiting();
 		void refreshCacheStatus(ctx);
 		activeTui?.requestRender();
 	});
@@ -315,12 +211,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		stopCacheStatus();
-		stopWakeStatus();
 		stopSpinner();
 		activeTui = undefined;
 		footerDataRef = undefined;
 		activeContext = undefined;
-		pendingRound = null;
 		lastStopped = undefined;
 		waitingReason = "";
 		isWorking = false;
@@ -334,8 +228,8 @@ export default function (pi: ExtensionAPI) {
 			cacheTimer = setInterval(() => { void refreshCacheStatus(ctx); }, 300_000);
 			cacheTimer.unref();
 		}
-		void startWakeStatus(ctx);
 		lastStopped = undefined;
+		waitingReason = "";
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (entry.type !== "custom") continue;
 			const data = entry.data as { at?: number; kind?: string; status?: string } | undefined;
@@ -344,8 +238,6 @@ export default function (pi: ExtensionAPI) {
 					["completed", "failed", "aborted", "suspended"].includes(data.status ?? "") ? Date.parse(entry.timestamp) : undefined;
 			if (typeof at === "number" && Number.isFinite(at) && (lastStopped === undefined || at > lastStopped)) lastStopped = at;
 		}
-		refreshPendingRound();
-		refreshWaiting();
 		isWorking = !ctx.isIdle();
 		spinnerIndex = 0;
 		branchCache = undefined;
@@ -353,7 +245,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	function applySlim(ctx: ExtensionContext) {
-		refreshPendingRound();
 		ctx.ui.setWorkingVisible(false);
 
 		// Sink footer: renders nothing, but subscribes to live git branch updates and exposes
@@ -381,26 +272,6 @@ export default function (pi: ExtensionAPI) {
 				activeTui = tui;
 			}
 
-			private pendingSubmit() {
-				const submit = (this as IntentEditor).submit;
-				return pendingRound && typeof submit === "function" ? submit : undefined;
-			}
-
-			handleInput(data: string) {
-				if (matchesKey(data, "alt+enter")) {
-					refreshPendingRound();
-					const submit = this.pendingSubmit();
-					if (submit) {
-						if (!this.disableSubmit) {
-							const submitContext = structuredClone({ afterResults: pendingRound });
-							submit.call(this, { submitIntent: "followUp", submitContext });
-						}
-						return;
-					}
-				}
-				super.handleInput(data);
-			}
-
 			render(width: number): string[] {
 				const lines = super.render(width);
 				if (lines.length < 2) return lines;
@@ -426,7 +297,7 @@ export default function (pi: ExtensionAPI) {
 
 				lines[0] = fitBorderSegmented(left, minLeftWidth, right, width, muted, [
 					lastStopped === undefined ? "" : formatStopped(lastStopped),
-					isWorking ? "" : waitingReason || (helperIsWaiting() ? "waiting for wake" : ""),
+					isWorking ? "" : waitingReason,
 				]);
 				// Drop the bottom border row — all status info lives on top now.
 				if (this.isShowingAutocomplete()) return lines;
