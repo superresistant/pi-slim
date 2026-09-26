@@ -149,7 +149,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 	});
-	pi.on("agent_end", async (event) => {
-		if (!isHandoffTurn(event.messages)) notify(notificationTitle(), notificationBody(event.messages), notificationNeedsAttention(event));
+	pi.on("agent_end", async (event, ctx) => {
+		if (ctx.mode === "tui" && !isHandoffTurn(event.messages)) notify(notificationTitle(), notificationBody(event.messages), notificationNeedsAttention(event));
 	});
 }

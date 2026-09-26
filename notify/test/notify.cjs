@@ -254,14 +254,15 @@ async function testNonTuiPaneIdentity() {
   for (const mode of ['rpc', 'json', 'print']) {
     const events = new Map();
     loadExtension(path.join(root, 'index.ts'))({ events: { on: () => () => {} }, on: (name, handler) => events.set(name, handler) });
-    const before = execCalls.length;
+    const before = execCalls.length, sent = notifications.length;
     const context = { ...ctx, mode, hasUI: mode === 'rpc' };
-    for (const name of ['session_start', 'before_agent_start', 'agent_start', 'tool_execution_start', 'agent_settled', 'session_shutdown']) {
-      await events.get(name)({ reason: 'restart' }, context);
+    for (const name of ['session_start', 'before_agent_start', 'agent_start', 'tool_execution_start', 'agent_end', 'agent_settled', 'session_shutdown']) {
+      await events.get(name)({ reason: 'restart', messages: [{ role: 'assistant', content: [{ type: 'text', text: 'done' }] }] }, context);
     }
     assert.equal(execCalls.length, before, `${mode} lifecycle must not change parent pane metadata or reload Kitty`);
+    assert.equal(notifications.length, sent, `${mode} completion must not notify`);
   }
-  console.log('PASS  RPC/JSON/print workers never publish or clear parent pane identity');
+  console.log('PASS  RPC/JSON/print workers never notify, publish or clear parent pane identity');
 }
 
 main().catch((error) => {
