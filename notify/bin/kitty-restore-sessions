@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""List Pi sessions that died with Kitty and are open nowhere; --open reopens each via `bus open`."""
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import session_registry
+
+
+def main():
+    args = sys.argv[1:]
+    if args not in ([], ["--open"]):
+        sys.exit("usage: kitty-restore-sessions [--open]")
+    try:
+        result = subprocess.run(["bus", "agents", "--json"], check=True, capture_output=True, text=True, timeout=15)
+        live = [a.get("session") for a in json.loads(result.stdout) if isinstance(a, dict)]
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        sys.exit(f"bus agents unavailable: {error}")
+    entries = session_registry.read()
+    lost = session_registry.casualties(entries, live)
+    if not lost:
+        print("nothing to restore")
+        return
+    failed = 0
+    for entry in lost:
+        print(f"{entry['cwd']}  {entry['session']}")
+        if args:
+            opened = subprocess.run(["bus", "open", entry["cwd"], "--session", entry["session"]])
+            if opened.returncode == 0:
+                entry["file"].unlink(missing_ok=True)
+            else:
+                failed += 1
+    if failed:
+        sys.exit(f"{failed} session(s) failed to open")
+
+
+main()

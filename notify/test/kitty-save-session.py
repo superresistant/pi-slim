@@ -3,11 +3,15 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 
 SAVER = Path(__file__).resolve().parents[1] / "bin/kitty-save-session"
+sys.path.insert(0, str(SAVER.parent))
+import session_registry  # noqa: E402
 FLAG = "PI_HANDOFF_INBOX_ONBOARDING"
 ANCHOR_ENV = {
     "PI_ANCHOR_GUIDE": '{"pid":123,"cwd":"/guide cwd","session":"/guide session.jsonl"}',
@@ -50,6 +54,10 @@ class SaveSessionTest(unittest.TestCase):
             f"assert os.environ[{FLAG!r}] == '1'\n"
             f"assert all(os.environ[k] == v for k, v in {ANCHOR_ENV!r}.items())\n"
             "if sys.argv[1:] == ['@', '--to', 'unix:/test-kitty', 'ls']:\n"
+            "    count = pathlib.Path(os.environ['SAVE_STATE'] + '.count')\n"
+            "    calls = int(count.read_text()) + 1 if count.exists() else 1\n"
+            "    count.write_text(str(calls))\n"
+            "    if calls > int(os.environ.get('SAVE_LS_LIMIT', '1000')): sys.exit(1)\n"
             "    print(pathlib.Path(os.environ['SAVE_STATE']).read_text())\n"
             "else:\n"
             "    assert sys.argv[1:-1] == ['@', '--to', 'unix:/test-kitty', "
@@ -70,12 +78,14 @@ class SaveSessionTest(unittest.TestCase):
                         PATH=f"{binary}:{os.environ['PATH']}",
                         KITTY_LISTEN_ON="unix:/test-kitty",
                         SAVE_FIXTURE=str(self.fixture), SAVE_STATE=str(self.home / 'live.json'),
-                        SAVE_CONTROLS=str(self.home / 'controls.json'), **{FLAG: "1", **ANCHOR_ENV})
+                        SAVE_CONTROLS=str(self.home / 'controls.json'),
+                        PI_SESSION_REGISTRY=str(self.home / 'registry'), **{FLAG: "1", **ANCHOR_ENV})
 
     def save(self, text):
         self.fixture.write_text(text)
         Path(self.env['SAVE_STATE']).write_text(json.dumps(self.live))
         Path(self.env['SAVE_CONTROLS']).write_text(json.dumps(self.controls))
+        Path(self.env['SAVE_STATE'] + '.count').unlink(missing_ok=True)
         subprocess.run([str(SAVER), "--auto"], env=self.env, check=True,
                        capture_output=True, text=True, timeout=10)
         return self.saved.read_text()
@@ -192,7 +202,7 @@ class SaveSessionTest(unittest.TestCase):
         self.controls[str(self.pid + 1)] = {'pid': self.pid + 1, 'cwd': str(self.home), 'session': str(self.session)}
         foreground = {'pid': self.pid, 'cwd': str(self.home), 'cmdline': ['pi']}
         another = {'pid': self.pid + 1, 'cwd': str(self.home), 'cmdline': ['pi']}
-        for windows in ([], [{'id': 7, 'foreground_processes': []}],
+        for windows in ([{'id': 7, 'foreground_processes': []}],
                         [{'id': 8, 'foreground_processes': [foreground]}],
                         [{'id': 7, 'foreground_processes': [foreground, another]}],
                         [{'id': 7, 'foreground_processes': [foreground]}, {'id': 7, 'foreground_processes': [foreground]}]):
@@ -201,13 +211,29 @@ class SaveSessionTest(unittest.TestCase):
                 result = self.save(launch('--var=pi_session=' + str(self.session), self.serialized, '/original/pi') + '\n')
                 self.assertEqual(shlex.split(result), ['launch', self.serialized, '/original/pi'])
 
-    def test_unregistered_agent_or_invalid_snapshot_never_uses_tag(self):
+    def test_unregistered_agent_never_uses_tag(self):
         del self.controls[str(self.pid)]
-        for live in (self.live, None, 'unavailable'):
-            with self.subTest(live=live):
+        result = self.save(launch('--var=pi_session=' + str(self.session), self.serialized, '/original/pi') + '\n')
+        self.assertEqual(shlex.split(result), ['launch', self.serialized, '/original/pi'])
+
+    def test_unavailable_kitty_or_bus_keeps_previous_session(self):
+        good = self.save(launch(self.serialized, '/original/pi') + '\n')
+        self.assertIn('--session', good)
+        bus = self.home / 'bin/bus'
+        for live, broken_bus in ((None, False), ('unavailable', False), ([], False), (self.live, True)):
+            with self.subTest(live=live, broken_bus=broken_bus):
                 self.live = live
-                result = self.save(launch('--var=pi_session=' + str(self.session), self.serialized, '/original/pi') + '\n')
-                self.assertEqual(shlex.split(result), ['launch', self.serialized, '/original/pi'])
+                bus.write_text('#!/bin/sh\nexit 1\n' if broken_bus else bus.read_text())
+                self.assertEqual(self.save(launch(self.serialized, '/original/pi') + '\n'), good)
+                self.assertEqual(self.saved.read_text(), good)
+
+    def test_bare_node_shell_startup_dropped(self):
+        del self.controls[str(self.pid)]
+        data = 'kitty-unserialize-data=' + json.dumps({"id": 7, "cmd_at_shell_startup": ["/usr/bin/node"]})
+        script = 'kitty-unserialize-data=' + json.dumps({"id": 7, "cmd_at_shell_startup": ["/usr/bin/node", "x.js"]})
+        self.assertEqual(shlex.split(self.save(launch('--cwd=/w', data) + '\n')),
+                         ['launch', '--cwd=/w', 'kitty-unserialize-data=' + json.dumps({"id": 7})])
+        self.assertEqual(shlex.split(self.save(launch('--cwd=/w', script) + '\n')), ['launch', '--cwd=/w', script])
 
     def test_non_pi_foreground_keeps_command_despite_polluted_tag(self):
         self.live[0]['tabs'][0]['windows'][0]['foreground_processes'] = [
@@ -280,6 +306,62 @@ class SaveSessionTest(unittest.TestCase):
     def test_clean_launch_and_command_argument_unchanged(self):
         text = f'launch --cwd="/work with spaces" /usr/bin/node script.js --env={FLAG}=1 --env=PI_ANCHOR_ACTIVE=1\n'
         self.assertEqual(self.save(text), text)
+
+    def spawn(self):
+        process = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        return process.pid
+
+    def register(self, pid, session, kitty_pid, **extra):
+        registry = Path(self.env['PI_SESSION_REGISTRY'])
+        registry.mkdir(exist_ok=True)
+        entry = {"pid": pid, "start": session_registry.process_start(pid), "cwd": str(self.home), "session": str(session),
+                 "windowId": 7, "kittyPid": kitty_pid, "kittyStart": session_registry.process_start(kitty_pid),
+                 "updated": time.time() * 1000, **extra}
+        (registry / f"{pid}.json").write_text(json.dumps(entry))
+        return registry / f"{pid}.json"
+
+    def test_registry_maps_pi_missing_from_bus(self):
+        pid = self.spawn()
+        del self.controls[str(self.pid)]
+        self.live[0]['tabs'][0]['windows'][0]['foreground_processes'] = [{"pid": pid, "cwd": str(self.home), "cmdline": ["pi"]}]
+        self.register(pid, self.session, os.getpid())
+        expected = ['launch', self.serialized, '/usr/bin/pi', '--session', str(self.session)]
+        self.assertEqual(shlex.split(self.save(launch(self.serialized, '/original/pi') + '\n')), expected)
+        (self.home / 'bin/bus').write_text('#!/bin/sh\nexit 1\n')
+        self.assertEqual(shlex.split(self.save(launch(self.serialized, '/original/pi') + '\n')), expected)
+
+    def test_kitty_gone_after_snapshot_keeps_previous_session(self):
+        good = self.save(launch(self.serialized, '/original/pi') + '\n')
+        self.env['SAVE_LS_LIMIT'] = '1'
+        del self.controls[str(self.pid)]
+        self.assertEqual(self.save(launch(self.serialized, '/original/pi') + '\n'), good)
+
+    def test_registry_prune_and_casualties(self):
+        os.environ['PI_SESSION_REGISTRY'] = self.env['PI_SESSION_REGISTRY']
+        self.addCleanup(os.environ.pop, 'PI_SESSION_REGISTRY')
+        other = self.home / 'other.jsonl'
+        other.write_text('{}\n')
+        alive_kitty = self.spawn()
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        live_pi = self.spawn()
+        closed = self.register(dead.pid, other, alive_kitty)
+        crashed = self.register(dead.pid + 1_000_000_000, self.session, dead.pid, start="1")
+        reopened = self.register(dead.pid + 1_000_000_001, other, dead.pid, start="1")
+        self.register(live_pi, self.home / 'live.jsonl', alive_kitty)
+        entries = session_registry.prune(session_registry.read(), ['/elsewhere.jsonl'])
+        self.assertTrue(closed.exists())
+        self.assertEqual([e['session'] for e in session_registry.casualties(entries)], [str(self.session), str(other)])
+        data = json.loads(closed.read_text())
+        data['deadSeen'] -= session_registry.CLOSE_GRACE
+        closed.write_text(json.dumps(data))
+        entries = session_registry.prune(session_registry.read(), [str(other)])
+        self.assertFalse(closed.exists())
+        self.assertFalse(reopened.exists())
+        self.assertTrue(crashed.exists())
+        self.assertEqual([e['session'] for e in session_registry.casualties(entries)], [str(self.session)])
 
 
 if __name__ == "__main__":

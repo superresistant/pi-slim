@@ -106,6 +106,26 @@ function setKittyVar(isTui: boolean, ...args: string[]): Promise<void> {
 	});
 }
 
+const REGISTRY = process.env.PI_SESSION_REGISTRY ?? path.join(process.env.XDG_STATE_HOME ?? path.join(process.env.HOME ?? "", ".local/state"), "pi-terminal/sessions");
+
+function processStart(pid: number): string {
+	const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+	return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+}
+
+function registerSession(cwd: string, session: string): void {
+	const windowId = Number(process.env.KITTY_WINDOW_ID);
+	const kittyPid = Number(process.env.KITTY_PID);
+	if (!Number.isInteger(windowId) || !Number.isInteger(kittyPid)) return;
+	try {
+		fs.mkdirSync(REGISTRY, { recursive: true, mode: 0o700 });
+		const file = path.join(REGISTRY, `${process.pid}.json`);
+		const entry = { pid: process.pid, start: processStart(process.pid), cwd, session, windowId, kittyPid, kittyStart: processStart(kittyPid), updated: Date.now() };
+		fs.writeFileSync(`${file}.tmp`, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+		fs.renameSync(`${file}.tmp`, file);
+	} catch {}
+}
+
 export default function (pi: ExtensionAPI) {
 	let kittyConfigReloadStarted = false;
 	let activeSession: { cwd: string; session: string } | undefined;
@@ -122,6 +142,7 @@ export default function (pi: ExtensionAPI) {
 		activeSession = ctx.mode === "tui" && ctx.sessionManager.getSessionFile()
 			? { cwd: fs.realpathSync(ctx.cwd), session: ctx.sessionManager.getSessionFile()! }
 			: undefined;
+		if (activeSession) registerSession(activeSession.cwd, activeSession.session);
 		await setKittyVar(ctx.mode === "tui", "agent-status", "clear");
 		await setKittyVar(ctx.mode === "tui", "session-file", ctx.sessionManager.getSessionFile() ?? "");
 	});

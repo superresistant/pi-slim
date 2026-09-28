@@ -46,7 +46,7 @@ fi
 tmp=$(mktemp "${session%/*}/.last-session.tmp.XXXXXX.kitty-session")
 trap 'rm -f "$tmp"' EXIT
 kitty @ --to "$listen_on" action save_as_session --save-only --use-foreground-process "$tmp"
-if ! python3 - "$tmp" "$listen_on" <<'PY'
+if ! python3 - "$tmp" "$listen_on" "$(dirname "$(realpath "$0")")" <<'PY'
 import json
 import os
 import shlex
@@ -87,9 +87,16 @@ def read_windows():
                     windows[window_id] = None if window_id in windows else window
         return windows
     except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
-        return {}
+        return None
 
 windows = read_windows()
+if not windows:
+    sys.exit("kitty @ ls unavailable; keeping previous session")
+
+sys.path.insert(0, sys.argv[3])
+import session_registry
+
+registry = session_registry.read()
 
 def read_agents():
     try:
@@ -97,9 +104,19 @@ def read_agents():
         return {agent["pid"]: agent for agent in json.loads(result.stdout)
                 if isinstance(agent, dict) and type(agent.get("pid")) is int}
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
-        return {}
+        return None
 
 agents = read_agents()
+registered = {entry["pid"]: entry for entry in registry if entry["alive"]}
+if agents is None:
+    for window in windows.values():
+        for process in (window or {}).get("foreground_processes", []):
+            if process.get("cmdline", [""])[:1] == ["pi"] and process.get("pid") not in registered:
+                sys.exit("bus agents unavailable; keeping previous session")
+    agents = {}
+else:
+    session_registry.prune(registry, [a.get("session") for a in agents.values()])
+agents.update(registered)
 
 def foreground_session(window_id):
     window = windows.get(window_id)
@@ -127,6 +144,7 @@ def rewrite_launch(line):
     except ValueError:
         return line
     drop = set()
+    changed = False
     window_ids = []
     for index, token in enumerate(tokens[1:], 1):
         if not token.startswith(("--", "kitty-unserialize-data=")):
@@ -141,7 +159,19 @@ def rewrite_launch(line):
                 window_ids.append(data.get("id") if isinstance(data, dict) else None)
             except ValueError:
                 window_ids.append(None)
-    if drop:
+        if token.startswith("kitty-unserialize-data="):
+            try:
+                data = json.loads(token.split("=", 1)[1])
+            except ValueError:
+                continue
+            if (isinstance(data, dict) and isinstance(data.get("cmd_at_shell_startup"), list)
+                    and len(data["cmd_at_shell_startup"]) == 1
+                    and os.path.basename(str(data["cmd_at_shell_startup"][0])) == "node"):
+                data.pop("cmd_at_shell_startup")
+                tokens[index] = "kitty-unserialize-data=" + json.dumps(data)
+                drop.discard(index)
+                changed = True
+    if drop or changed:
         tokens = [token for index, token in enumerate(tokens) if index not in drop]
         line = " ".join(shlex.quote(token) for token in tokens)
     session, cwd = foreground_session(window_ids[0]) if len(window_ids) == 1 and type(window_ids[0]) is int and window_ids[0] > 0 else ("", "")
@@ -172,6 +202,11 @@ for index, line in enumerate(lines):
 path.write_text("\n".join(lines))
 PY
 then
+    [ "$auto" -eq 1 ] && exit 0
+    exit 1
+fi
+if ! timeout 3 kitty @ --to "$listen_on" ls >/dev/null 2>&1; then
+    echo "Kitty stopped responding during save; keeping previous session" >&2
     [ "$auto" -eq 1 ] && exit 0
     exit 1
 fi
