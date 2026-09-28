@@ -50,17 +50,24 @@ export class NotesEditor extends tui.Editor {
   constructor(screen, theme, options) {
     super(screen, theme, { ...options, collapsePastes: false });
   }
-  render(width) {
+  withEditorRows(fn) {
     const terminal = this.tui.terminal;
     const descriptor = Object.getOwnPropertyDescriptor(terminal, 'rows');
-    const rows = terminal.rows;
-    Object.defineProperty(terminal, 'rows', { configurable: true, value: Math.ceil(rows * 0.66 / 0.3) });
-    let lines;
-    try { lines = super.render(width); }
+    const target = terminal.rows - 1;
+    let rows = Math.ceil(target / 0.3);
+    while (Math.floor(rows * 0.3) < target) rows++;
+    Object.defineProperty(terminal, 'rows', { configurable: true, value: rows });
+    try { return fn(); }
     finally {
       if (descriptor) Object.defineProperty(terminal, 'rows', descriptor);
       else delete terminal.rows;
     }
+  }
+  pageScroll(direction) {
+    this.withEditorRows(() => super.pageScroll(direction));
+  }
+  render(width) {
+    const lines = this.withEditorRows(() => super.render(width));
     const label = tui.truncateToWidth(` Notes · ${this.status} · ${this.origin} · Ctrl+Q close `, width, '');
     lines[0] = this.borderColor(label + '─'.repeat(Math.max(0, width - tui.visibleWidth(label))));
     return this.isShowingAutocomplete() ? lines : lines.slice(0, -1);

@@ -165,5 +165,12 @@ test('actual Pi editor: Enter, configured undo, Unicode, large paste, render and
   editor.handleInput('\x1a');
   assert.equal(editor.getText(), 'café 👩🏽‍💻 漢字\\\n');
   editor.setText(Array.from({ length: 60 }, (_, i) => `line ${i}`).join('\n'));
-  assert.equal(editor.render(80).length, 16);
+  assert.equal(editor.render(80).length, 24);
+  for (const rows of [6, 10, 24, 37, 50, 61]) {
+    terminal.rows = rows;
+    assert.equal(editor.render(80).length, rows);
+  }
+  terminal.rows = 24;
+  editor.handleInput('\x1b[5~');
+  assert.equal(editor.getCursor().line, 59 - 23);
 });
