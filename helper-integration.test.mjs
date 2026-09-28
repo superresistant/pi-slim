@@ -52,7 +52,7 @@ test("isolated agent-bus emits unresolved peer state consumed by slim without ol
 			emit: (name, data) => { if (name === "agent-bus:state:v1") states.push(data); for (const fn of events.get(name) ?? []) fn(data); } },
 		on: (name, fn) => { const handlers = lifecycle.get(name) ?? []; handlers.push(fn); lifecycle.set(name, handlers); },
 		appendEntry: (customType, data) => entries.push({ type: "custom", customType, data }),
-		registerCommand() {}, getThinkingLevel: () => "off",
+		registerCommand() {}, registerTool() {}, getThinkingLevel: () => "off",
 		sendMessage() { assert.fail("no bus delivery to this isolated recipient"); },
 	};
 	const fire = (name) => { for (const fn of lifecycle.get(name) ?? []) fn({}, ctx); };
