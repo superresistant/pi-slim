@@ -116,6 +116,7 @@ export async function main() {
     if (!saved && !signal) return;
     closing = true;
     screen.stop();
+    leaveAltScreen();
     note.close();
     if (!signal) await terminal.drainInput();
     if (!saved) console.error(editor.status);
@@ -148,9 +149,16 @@ export async function main() {
     }
   });
   for (const signal of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(signal, () => { void close(true); });
-  process.on('exit', note.close);
+  let altScreen = false;
+  function leaveAltScreen() {
+    if (altScreen) process.stdout.write('\x1b[?1049l');
+    altScreen = false;
+  }
+  process.on('exit', () => { leaveAltScreen(); note.close(); });
   screen.addChild(editor);
   screen.setFocus(editor);
+  process.stdout.write('\x1b[?1049h\x1b[H');
+  altScreen = true;
   screen.start();
   if (process.env.KITTY_WINDOW_ID) {
     for (const [key, value] of Object.entries({ notes_cwd: note.metadata.cwd, notes_session: values.session })) {
