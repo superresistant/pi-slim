@@ -45,8 +45,8 @@ class LauncherTest(unittest.TestCase):
         self.assertNotIn('wrong ambient session', command)
 
     def test_repeat_focus_and_notes_pane_reuse(self):
-        existing = {'id': 100, 'cwd': self.cwd, 'user_vars': {'notes_cwd': self.cwd, 'notes_session': self.session}}
-        self.tabs[0]['tabs'][0]['windows'].append(existing)
+        existing = {'id': 100, 'cwd': self.cwd, 'user_vars': {'notes_cwd': self.cwd, 'notes_session': 'other session'}}
+        self.tabs[0]['tabs'][1]['windows'].append(existing)
         self.assertEqual(self.run_launch(), 100)
         self.assertEqual(self.calls[-1][-3:], ['focus-window', '--match', 'id:100'])
         self.calls.clear()

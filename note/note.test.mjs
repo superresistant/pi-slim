@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -39,10 +39,41 @@ test('Markdown bytes, provenance, reopening, isolation and exclusive writer', t 
   assert.equal(reopened.metadata.created, note.metadata.created);
   note.close();
   assert.throws(() => openNote(options), /already open/);
+  assert.throws(() => openNote({ ...options, session: '' }), /already open/);
+  reopened.close();
   const other = openNote({ ...options, session: '/sessions/two.jsonl' });
   t.after(other.close);
-  assert.notEqual(other.path, note.path);
-  assert.equal(other.text, '');
+  assert.equal(other.path, note.path);
+  assert.equal(other.text, text);
+});
+
+test('one note per folder merges older per-session notes once, oldest first', t => {
+  const options = fixture(t);
+  const cwd = realpathSync(options.cwd);
+  const legacy = (name, created, text, lock) => {
+    const dir = join(options.root, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'origin.json'), JSON.stringify({ cwd, created }));
+    writeFileSync(join(dir, 'scratch.md'), text);
+    if (lock) writeFileSync(join(dir, '.lock'), String(lock));
+    return dir;
+  };
+  const newer = legacy('p-b', '2026-09-13T12:55:00.000+02:00', 'second', process.pid);
+  const older = legacy('p-a', '2026-09-10T07:55:00.000+02:00', 'first\n');
+  legacy('p-c', '2026-09-14T00:00:00.000+02:00', '  \n');
+  legacy('other', '2026-09-01T00:00:00.000+02:00', 'other folder');
+  writeFileSync(join(options.root, 'other', 'origin.json'), JSON.stringify({ cwd: '/elsewhere' }));
+  assert.throws(() => openNote(options), /already open/);
+  rmSync(join(newer, '.lock'));
+  const note = openNote(options);
+  assert.equal(note.text, 'first\n\nsecond');
+  assert.deepEqual(note.metadata.mergedFrom, [older, newer]);
+  assert.equal(readFileSync(join(older, 'scratch.md'), 'utf8'), 'first\n');
+  note.save('edited');
+  note.close();
+  const again = openNote(options);
+  t.after(again.close);
+  assert.equal(again.text, 'edited');
 });
 
 test('stale lock recovery and visible persistence errors', t => {
@@ -98,7 +129,7 @@ test('image clipboard and screenshot paths persist through undo and reopening', 
     assert.equal(reopened.text, editor.getExpandedText());
     assert.ok(readFileSync(imagePath).length);
     reopened.close();
-    const blocked = openNote({ ...options, session: 'blocked' });
+    const blocked = openNote({ ...options, cwd: join(options.cwd, '..') });
     writeFileSync(join(dirname(blocked.path), 'images'), 'not a directory');
     copy('image/png', image);
     const before = editor.getExpandedText();

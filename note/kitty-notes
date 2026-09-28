@@ -26,13 +26,13 @@ def launch(keep_focus=False):
     def remote(*args):
         return subprocess.check_output(['kitten', '@', '--to', socket, *args], text=True)
 
-    tab, window = origin(json.loads(remote('ls')), window_id)
+    tabs = json.loads(remote('ls'))
+    tab, window = origin(tabs, window_id)
     variables = window.get('user_vars', {})
     cwd = str(Path(variables.get('notes_cwd') or window['cwd']).resolve(strict=True))
     session = variables.get('notes_session', variables.get('pi_session', ''))
-    for candidate in tab['windows']:
-        notes = candidate.get('user_vars', {})
-        if notes.get('notes_cwd') == cwd and notes.get('notes_session', '') == session:
+    for candidate in (w for os_window in tabs for t in os_window['tabs'] for w in t['windows']):
+        if candidate.get('user_vars', {}).get('notes_cwd') == cwd:
             if not keep_focus:
                 remote('focus-window', '--match', f"id:{candidate['id']}")
             return candidate['id']
