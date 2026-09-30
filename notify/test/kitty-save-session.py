@@ -87,7 +87,7 @@ class SaveSessionTest(unittest.TestCase):
         Path(self.env['SAVE_CONTROLS']).write_text(json.dumps(self.controls))
         Path(self.env['SAVE_STATE'] + '.count').unlink(missing_ok=True)
         subprocess.run([str(SAVER), "--auto"], env=self.env, check=True,
-                       capture_output=True, text=True, timeout=10)
+                       capture_output=True, text=True, timeout=30)
         return self.saved.read_text()
 
     def test_contaminated_pi_launch_preserves_identity_and_layout_defers_model(self):
@@ -362,6 +362,15 @@ class SaveSessionTest(unittest.TestCase):
         self.assertFalse(reopened.exists())
         self.assertTrue(crashed.exists())
         self.assertEqual([e['session'] for e in session_registry.casualties(entries)], [str(self.session)])
+
+    def test_hung_kitty_save_keeps_previous_session(self):
+        good = self.save(launch(self.serialized, '/original/pi') + '\n')
+        kitty = self.home / 'bin/kitty'
+        kitty.write_text(kitty.read_text().replace("else:\n", "else:\n    import time; time.sleep(30)\n", 1))
+        started = time.monotonic()
+        self.assertEqual(self.save(launch(self.serialized, '/other/pi') + '\n'), good)
+        self.assertLess(time.monotonic() - started, 25)
+        self.assertEqual(list(self.saved.parent.glob('.last-session.tmp.*')), [])
 
 
 if __name__ == "__main__":

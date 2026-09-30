@@ -45,7 +45,12 @@ fi
 
 tmp=$(mktemp "${session%/*}/.last-session.tmp.XXXXXX.kitty-session")
 trap 'rm -f "$tmp"' EXIT
-kitty @ --to "$listen_on" action save_as_session --save-only --use-foreground-process "$tmp"
+trap 'exit 143' TERM INT
+if ! timeout 15 kitty @ --to "$listen_on" action save_as_session --save-only --use-foreground-process "$tmp"; then
+    echo "Kitty did not save the session in time; keeping previous session" >&2
+    [ "$auto" -eq 1 ] && exit 0
+    exit 1
+fi
 if ! python3 - "$tmp" "$listen_on" "$(dirname "$(realpath "$0")")" <<'PY'
 import json
 import os
