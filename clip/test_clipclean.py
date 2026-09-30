@@ -2,6 +2,7 @@ import os
 import runpy
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -82,6 +83,46 @@ class ClipcleanTest(unittest.TestCase):
             args = args_capture.read_text()
             self.assertIn("--match id:123", args)
             self.assertIn("--bracketed-paste disable", args)
+
+
+class WatchTest(unittest.TestCase):
+    def test_watch_is_event_driven_on_isolated_x(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        log = root / "xclip.log"
+        wrapper = root / "xclip"
+        wrapper.write_text(f"#!/bin/sh\necho \"$*\" >> {log}\nexec /usr/bin/xclip \"$@\"\n")
+        wrapper.chmod(0o700)
+        xvfb = subprocess.Popen(["Xvfb", "-displayfd", "1", "-nolisten", "tcp"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.addCleanup(xvfb.wait)
+        self.addCleanup(xvfb.kill)
+        env = dict(os.environ, DISPLAY=":" + xvfb.stdout.readline().decode().strip(), PATH=f"{root}:{os.environ['PATH']}")
+        env.pop("XAUTHORITY", None)
+        watcher = subprocess.Popen([str(Path(__file__).with_name("clipclean")), "--watch", "-q"], env=env)
+        self.addCleanup(watcher.wait)
+        self.addCleanup(watcher.kill)
+        calls = lambda: len(log.read_text().splitlines()) if log.exists() else 0
+
+        def wait_for(check):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if check():
+                    return True
+                time.sleep(0.05)
+            return False
+
+        self.assertTrue(wait_for(lambda: calls() >= 1))
+        time.sleep(1.5)
+        self.assertEqual(calls(), 1)
+        padded = " " + "word " * 40 + "end     \n cleanup."
+        subprocess.run(["/usr/bin/xclip", "-selection", "clipboard", "-i"], input=padded, text=True, env=env, check=True)
+        read = lambda: subprocess.run(["/usr/bin/xclip", "-selection", "clipboard", "-o"], env=env, capture_output=True, text=True).stdout
+        self.assertTrue(wait_for(lambda: read() == ("word " * 40 + "end cleanup.")), (log.read_text(), read()))
+        settled = calls()
+        time.sleep(1.5)
+        self.assertEqual(calls(), settled)
+        self.assertEqual(settled, 4)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ in. Detection: most non-empty lines right-padded to one column width.
 
 Usage:
     clipclean          clean clipboard once (kitty-paste, notes)
-    clipclean --watch  daemon: poll clipboard every 500 ms
+    clipclean --watch  daemon: clean on each CLIPBOARD owner change (XFixes)
     -q is accepted for compatibility and ignored
 """
 
@@ -201,16 +201,29 @@ def cleaned(text):
     return clean_tui_paste(text, padded_width=width) if is_tui else None
 
 
-def watch():
-    import time
-    last = None
+def clipboard_changes():
+    """Yield once at start, then on each X11 CLIPBOARD owner change (XFixes); no polling."""
+    from Xlib import display
+    from Xlib.ext import xfixes
+    d = display.Display()
+    d.xfixes_query_version()
+    clipboard = d.intern_atom("CLIPBOARD")
+    d.xfixes_select_selection_input(d.screen().root, clipboard, xfixes.XFixesSetSelectionOwnerNotifyMask)
+    d.flush()
+    yield
     while True:
+        if getattr(d.next_event(), "selection", None) == clipboard:
+            yield
+
+
+def watch(changes=None):
+    last = None
+    for _ in changes if changes is not None else clipboard_changes():
         text = get_clipboard()
         if text and text != last:
             last = cleaned(text) or text
             if last != text:
                 set_clipboard(last)
-        time.sleep(0.5)
 
 
 if __name__ == "__main__":
