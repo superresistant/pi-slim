@@ -144,6 +144,15 @@ def foreground_session(window_id):
         return session, live_cwd
     return "", ""
 
+SAFE_STARTUP = {"pi", "aa", "vim", "nvim", "vi", "nano", "less", "man", "htop", "btop", "top"}
+
+def safe_startup(command):
+    try:
+        words = shlex.split(command) if isinstance(command, str) else [str(word) for word in command]
+    except (ValueError, TypeError):
+        return False
+    return bool(words) and os.path.basename(words[0]) in SAFE_STARTUP
+
 def rewrite_launch(line):
     try:
         tokens = shlex.split(line)
@@ -170,9 +179,7 @@ def rewrite_launch(line):
                 data = json.loads(token.split("=", 1)[1])
             except ValueError:
                 continue
-            if (isinstance(data, dict) and isinstance(data.get("cmd_at_shell_startup"), list)
-                    and len(data["cmd_at_shell_startup"]) == 1
-                    and os.path.basename(str(data["cmd_at_shell_startup"][0])) == "node"):
+            if isinstance(data, dict) and "cmd_at_shell_startup" in data and not safe_startup(data["cmd_at_shell_startup"]):
                 data.pop("cmd_at_shell_startup")
                 tokens[index] = "kitty-unserialize-data=" + json.dumps(data)
                 drop.discard(index)

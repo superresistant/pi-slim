@@ -227,13 +227,24 @@ class SaveSessionTest(unittest.TestCase):
                 self.assertEqual(self.save(launch(self.serialized, '/original/pi') + '\n'), good)
                 self.assertEqual(self.saved.read_text(), good)
 
-    def test_bare_node_shell_startup_dropped(self):
+    def test_node_shell_startup_dropped(self):
         del self.controls[str(self.pid)]
         data = 'kitty-unserialize-data=' + json.dumps({"id": 7, "cmd_at_shell_startup": ["/usr/bin/node"]})
         script = 'kitty-unserialize-data=' + json.dumps({"id": 7, "cmd_at_shell_startup": ["/usr/bin/node", "x.js"]})
         self.assertEqual(shlex.split(self.save(launch('--cwd=/w', data) + '\n')),
                          ['launch', '--cwd=/w', 'kitty-unserialize-data=' + json.dumps({"id": 7})])
-        self.assertEqual(shlex.split(self.save(launch('--cwd=/w', script) + '\n')), ['launch', '--cwd=/w', script])
+        self.assertEqual(shlex.split(self.save(launch('--cwd=/w', script) + '\n')),
+                         ['launch', '--cwd=/w', 'kitty-unserialize-data=' + json.dumps({"id": 7})])
+
+    def test_only_safe_shell_startup_commands_kept(self):
+        del self.controls[str(self.pid)]
+        for command, kept in (("systemctl --user stop aa", False), ("sudo reboot", False), (["/usr/bin/xclip", "-selection", "primary"], False),
+                              ("rm -rf x", False), ("vim notes.md", True), (["/usr/bin/less", "f"], True), ("'unterminated", False)):
+            with self.subTest(command=command):
+                data = {"id": 7, "cmd_at_shell_startup": command}
+                result = shlex.split(self.save(launch('kitty-unserialize-data=' + json.dumps(data)) + '\n'))
+                expected = data if kept else {"id": 7}
+                self.assertEqual(json.loads(result[1].split("=", 1)[1]), expected)
 
     def test_non_pi_foreground_keeps_command_despite_polluted_tag(self):
         self.live[0]['tabs'][0]['windows'][0]['foreground_processes'] = [
