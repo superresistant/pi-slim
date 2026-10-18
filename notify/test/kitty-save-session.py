@@ -372,6 +372,16 @@ class SaveSessionTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 25)
         self.assertEqual(list(self.saved.parent.glob('.last-session.tmp.*')), [])
 
+    def test_aa_window_keeps_aa_attach(self):
+        aa = self.home / 'bin/aa'
+        aa.write_text('#!/bin/sh\n')
+        aa.chmod(0o755)
+        xclip = 'kitty-unserialize-data=' + json.dumps({"id": 7, "cmd_at_shell_startup": ["/usr/bin/xclip", "-selection", "primary"]})
+        result = self.save(launch(xclip, '--var=aa=1', '--cwd=/w') + '\n')
+        self.assertEqual(shlex.split(result), ['launch', 'kitty-unserialize-data=' + json.dumps({"id": 7}), '--var=aa=1', '--cwd=/w', str(aa), 'attach'])
+        result = self.save(launch(self.serialized, '--var=aa=1', str(aa), 'attach') + '\n')
+        self.assertEqual(shlex.split(result), ['launch', self.serialized, '--var=aa=1', str(aa), 'attach'])
+
 
 if __name__ == "__main__":
     unittest.main()
