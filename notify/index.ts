@@ -82,18 +82,20 @@ function isHandoffTurn(messages: unknown[]): boolean {
 	return false;
 }
 
-function notificationNeedsAttention(event: { aborted?: unknown; messages: unknown[] }): boolean {
-	if (event.aborted === true) return true;
+type Prio = "need" | "problem" | "done" | "info";
+
+function notificationPrio(event: { aborted?: unknown; messages: unknown[] }): Prio {
+	if (event.aborted === true) return "info";
 	for (let i = event.messages.length - 1; i >= 0; i--) {
 		const message = event.messages[i] as { role?: unknown; stopReason?: unknown };
-		if (message?.role === "assistant") return message.stopReason === "error" || message.stopReason === "aborted";
+		if (message?.role === "assistant") return message.stopReason === "error" ? "problem" : message.stopReason === "aborted" ? "info" : "done";
 	}
-	return false;
+	return "done";
 }
 
-function notify(title: string, body: string, needsAttention: boolean): void {
+function notify(title: string, body: string, prio: Prio): void {
 	try {
-		const child = spawn(DISPATCHER, ["send", title, body, ...(needsAttention ? [] : ["--completion"])], { detached: true, stdio: "ignore" });
+		const child = spawn(DISPATCHER, ["send", title, body, ...(prio === "done" ? ["--completion"] : []), "--prio", prio], { detached: true, stdio: "ignore" });
 		child.on("error", () => {});
 		child.unref();
 	} catch {}
@@ -136,7 +138,7 @@ export default function (pi: ExtensionAPI) {
 		const reason = stripControl(event.reason.replace(/[\r\n\t]+/g, " ")).replace(/\s+/g, " ").trim();
 		const label = event.state === "off" ? "stopped" : "waiting";
 		const body = Array.from(`Autopilot ${label}${reason ? `: ${reason}` : ""}`).slice(0, MAX_BODY_CHARS).join("");
-		notify(notificationTitle(), body, true);
+		notify(notificationTitle(), body, "need");
 	});
 	pi.on("session_start", async (_event, ctx) => {
 		activeSession = ctx.mode === "tui" && ctx.sessionManager.getSessionFile()
@@ -171,6 +173,6 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 	pi.on("agent_end", async (event, ctx) => {
-		if (ctx.mode === "tui" && !isHandoffTurn(event.messages)) notify(notificationTitle(), notificationBody(event.messages), notificationNeedsAttention(event));
+		if (ctx.mode === "tui" && !isHandoffTurn(event.messages)) notify(notificationTitle(), notificationBody(event.messages), notificationPrio(event));
 	});
 }

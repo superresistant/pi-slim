@@ -12,6 +12,7 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("dispatcher", Path(__file__).resolve().parents[1] / "notify.py")
 dispatcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dispatcher)
+REAL_SEND_FEED = dispatcher.send_feed
 
 
 class VisibilityTest(unittest.TestCase):
@@ -32,6 +33,9 @@ class VisibilityTest(unittest.TestCase):
         run = patch.object(dispatcher.subprocess, "run", side_effect=self.kitty_ls)
         self.run = run.start()
         self.addCleanup(run.stop)
+        feed = patch.object(dispatcher, "send_feed", return_value=False)
+        self.feed = feed.start()
+        self.addCleanup(feed.stop)
         desktop = patch.object(dispatcher, "send_desktop", return_value=True)
         self.desktop = desktop.start()
         self.addCleanup(desktop.stop)
@@ -105,6 +109,30 @@ class VisibilityTest(unittest.TestCase):
         self.state[0]["is_focused"] = False
         self.send(False)
         self.send(False, completion=False)
+
+
+    def test_feed_first_desktop_only_as_fallback(self):
+        self.state[0]["is_focused"] = False
+        self.feed.return_value = True
+        self.assertEqual(dispatcher.send("Pi · x", "Done", completion=True), 0)
+        self.feed.assert_called_once_with("Pi · x", "Done", "done")
+        self.desktop.assert_not_called()
+        self.feed.reset_mock()
+        self.assertEqual(dispatcher.main(["notify.py", "send", "Pi · x", "Waiting", "--prio", "need"]), 0)
+        self.feed.assert_called_once_with("Pi · x", "Waiting", "need")
+        self.feed.return_value = False
+        self.assertEqual(dispatcher.send("Pi · x", "Failed"), 0)
+        self.assertEqual(self.feed.call_args.args[2], "problem")
+        self.desktop.assert_called_once_with("Pi · x", "Failed")
+
+    def test_send_feed_runs_aa_notify_one_line(self):
+        with patch.object(dispatcher.shutil, "which", return_value="/x/aa"), \
+                patch.object(dispatcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.assertTrue(REAL_SEND_FEED("Pi · x", "a\n\n b " + "c" * 300, "done"))
+        args = run.call_args.args[0]
+        self.assertEqual(args[:6], ["/x/aa", "notify", "--prio", "done", "--from", "Pi · x"])
+        self.assertEqual(len(args[6]), 160)
+        self.assertTrue(args[6].startswith("a b ccc"))
 
 
 if __name__ == "__main__":

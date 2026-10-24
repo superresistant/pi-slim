@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pi notification dispatcher: Kitty-tab mute, focus suppression, notify-send, Kitty user vars."""
+"""Pi notification dispatcher: Kitty-tab mute, focus suppression, aa feed (notify-send fallback), Kitty user vars."""
 
 import fcntl
 import json
@@ -123,7 +123,20 @@ def send_desktop(title: str, body: str) -> bool:
         return False
 
 
-def send(title: str, body: str, completion: bool = False) -> int:
+PRIOS = {"need", "problem", "done", "info"}
+
+
+def send_feed(title: str, body: str, prio: str) -> bool:
+    binary = shutil.which("aa") or str(Path.home() / ".local/bin/aa")
+    text = " ".join(body.split())[:160] or "Ready for input"
+    try:
+        return subprocess.run([binary, "notify", "--prio", prio, "--from", title, text],
+                              timeout=TIMEOUT, check=False, **QUIET).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def send(title: str, body: str, completion: bool = False, prio: str = "") -> int:
     try:
         state = kitty_state()
         if completion and source_is_focused(state):
@@ -133,7 +146,8 @@ def send(title: str, body: str, completion: bool = False) -> int:
             return 0
     except ERRORS:
         pass
-    return 0 if send_desktop(title, body) else 1
+    prio = prio if prio in PRIOS else ("done" if completion else "problem")
+    return 0 if send_feed(title, body, prio) or send_desktop(title, body) else 1
 
 
 def toggle() -> int:
@@ -166,8 +180,10 @@ def set_user_var(name: str, value: str) -> int:
 def main(argv: list[str]) -> int:
     command, args = (argv[1] if len(argv) > 1 else "send"), argv[2:]
     if command == "send":
+        rest = args[2:]
+        prio = rest[rest.index("--prio") + 1] if "--prio" in rest[:-1] else ""
         return send(args[0] if args else "Pi", args[1] if len(args) > 1 else "Ready for input",
-                    completion="--completion" in args[2:])
+                    completion="--completion" in rest, prio=prio)
     if command == "toggle":
         return toggle()
     value = args[0] if args else ""

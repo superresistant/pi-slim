@@ -6,15 +6,14 @@ const { EventEmitter } = require("node:events");
 const os = require("node:os");
 const path = require("node:path");
 const childProcess = require("node:child_process");
-const ts = require(path.join(os.homedir(), "dev/pi/pi-local/node_modules/typescript"));
 
 const root = path.resolve(__dirname, "..");
 function loadExtension(sourcePath) {
   const source = readFileSync(sourcePath, "utf8").replaceAll("import.meta.url", JSON.stringify(require("node:url").pathToFileURL(sourcePath).href));
-  const output = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
-    fileName: sourcePath,
-  }).outputText;
+  const output = Module.stripTypeScriptTypes(source, { mode: "transform" })
+    .replace(/^import \* as (\w+) from ("[^"]+");$/gm, "const $1 = require($2);")
+    .replace(/^import (\{[^}]+\}) from ("[^"]+");$/gm, "const $1 = require($2);")
+    .replace(/^export default function/m, "exports.default = function");
   const loaded = new Module(`${sourcePath}.test.cjs`, module);
   loaded.filename = `${sourcePath}.test.cjs`;
   loaded.paths = Module._nodeModulePaths(path.dirname(sourcePath));
@@ -164,14 +163,16 @@ async function testKittyRestart() {
 
 async function testVisibility() {
   await emit("session_start", { reason: "startup" });
-  for (const [event, completion] of [
-    [success, true], [{ messages: failure, aborted: false }, false],
-    [cancelled, false], [{ messages: aborted }, false],
-    [{ messages: currentAbort, aborted: false }, false],
-    [{ messages: [...failure, ...success.messages], aborted: false }, true],
+  for (const [event, completion, prio] of [
+    [success, true, "done"], [{ messages: failure, aborted: false }, false, "problem"],
+    [cancelled, false, "info"], [{ messages: aborted }, false, "info"],
+    [{ messages: currentAbort, aborted: false }, false, "problem"],
+    [{ messages: [...failure, ...success.messages], aborted: false }, true, "done"],
   ]) {
     await expectNotification(event, 1, "legacy notification missing");
-    assert.equal(notifications.at(-1)[1].includes("--completion"), completion);
+    const args = notifications.at(-1)[1];
+    assert.equal(args.includes("--completion"), completion);
+    assert.equal(args[args.indexOf("--prio") + 1], prio);
   }
   await emit("session_shutdown");
   console.log("PASS  completion visibility opt-in; errors and aborts retained");
@@ -188,6 +189,7 @@ async function testAutopilot() {
   assert.equal(notifications.length, before + 1);
   assert.equal(notifications.at(-1)[1][2], 'Autopilot waiting: Awaiting reviewer[31m');
   assert.equal(notifications.at(-1)[1].includes('--completion'), false);
+  assert.deepEqual(notifications.at(-1)[1].slice(-2), ['--prio', 'need']);
   bus.emit(channel, { ...valid, state: 'off', reason: 'PAUSE_UNSAFE' });
   assert.equal(notifications.at(-1)[1][2], 'Autopilot stopped: PAUSE_UNSAFE');
   const pulse = { messages: [{ role: 'custom', customType: 'bus-autopilot', content: 'Continue' }, ...success.messages], aborted: false };
