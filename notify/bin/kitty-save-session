@@ -9,36 +9,13 @@ if [ "${1:-}" = "--auto" ]; then
 fi
 [ "$#" -eq 0 ] || { echo "usage: kitty-save-session [--auto]" >&2; exit 2; }
 
-listen_on="${KITTY_LISTEN_ON:-}"
-if [ -z "$listen_on" ]; then
-    sockets=()
-    shopt -s nullglob
-    for socket in /tmp/kitty-*; do
-        [ -S "$socket" ] || continue
-        [ "$(stat -c %u "$socket" 2>/dev/null || true)" = "$(id -u)" ] || continue
-        pid=${socket##*-}
-        case "$pid" in ''|*[!0-9]*) continue ;; esac
-        [ "$(basename "$(readlink "/proc/$pid/exe" 2>/dev/null || true)")" = kitty ] || continue
-        sockets+=("unix:$socket")
-    done
-    if [ "${#sockets[@]}" -eq 0 ]; then
-        [ "$auto" -eq 1 ] && exit 0
-        echo "no running Kitty instance found" >&2
-        exit 1
-    fi
-    if [ "${#sockets[@]}" -ne 1 ]; then
-        echo "multiple Kitty instances found; session autosave skipped" >&2
-        [ "$auto" -eq 1 ] && exit 0
-        exit 1
-    fi
-    listen_on=${sockets[0]}
-fi
+listen_on="${KITTY_LISTEN_ON:?kitty-save-session: run from Kitty (KITTY_LISTEN_ON unset)}"
 
 session="$HOME/.config/kitty/last-session.kitty"
 mkdir -p "${session%/*}"
 exec 9>"$session.lock"
 if [ "$auto" -eq 1 ]; then
-    flock -n 9 || exit 0
+    flock -n 9 || exit 75
 else
     flock 9
 fi
@@ -48,7 +25,7 @@ trap 'rm -f "$tmp"' EXIT
 trap 'exit 143' TERM INT
 if ! timeout 15 kitty @ --to "$listen_on" action save_as_session --save-only --use-foreground-process "$tmp"; then
     echo "Kitty did not save the session in time; keeping previous session" >&2
-    [ "$auto" -eq 1 ] && exit 0
+    [ "$auto" -eq 1 ] && exit 75
     exit 1
 fi
 if ! python3 - "$tmp" "$listen_on" "$(dirname "$(realpath "$0")")" <<'PY'
@@ -227,13 +204,16 @@ for index, line in enumerate(lines):
 path.write_text("\n".join(lines))
 PY
 then
-    [ "$auto" -eq 1 ] && exit 0
+    [ "$auto" -eq 1 ] && exit 75
     exit 1
 fi
 if ! timeout 3 kitty @ --to "$listen_on" ls >/dev/null 2>&1; then
     echo "Kitty stopped responding during save; keeping previous session" >&2
-    [ "$auto" -eq 1 ] && exit 0
+    [ "$auto" -eq 1 ] && exit 75
     exit 1
+fi
+if [ -f "$session" ] && cmp -s "$tmp" "$session"; then
+    exit 0
 fi
 [ ! -f "$session" ] || cp -p "$session" "$session.bak"
 mv -f "$tmp" "$session"

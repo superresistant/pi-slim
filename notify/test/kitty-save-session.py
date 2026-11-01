@@ -86,8 +86,9 @@ class SaveSessionTest(unittest.TestCase):
         Path(self.env['SAVE_STATE']).write_text(json.dumps(self.live))
         Path(self.env['SAVE_CONTROLS']).write_text(json.dumps(self.controls))
         Path(self.env['SAVE_STATE'] + '.count').unlink(missing_ok=True)
-        subprocess.run([str(SAVER), "--auto"], env=self.env, check=True,
-                       capture_output=True, text=True, timeout=30)
+        result = subprocess.run([str(SAVER), "--auto"], env=self.env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertIn(result.returncode, (0, 75), result.stderr)
         return self.saved.read_text()
 
     def test_contaminated_pi_launch_preserves_identity_and_layout_defers_model(self):
@@ -129,7 +130,7 @@ class SaveSessionTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotIn(FLAG, second)
         self.assertNotIn("--env=PI_ANCHOR_", second)
-        self.assertEqual(self.saved.with_suffix(".kitty.bak").read_text(), first)
+        self.assertFalse(self.saved.with_suffix(".kitty.bak").exists())
         self.assertTrue(all(self.env[k] == v for k, v in ANCHOR_ENV.items()))
         self.assertEqual(self.env[FLAG], "1")
         self.assertEqual(self.fixture.read_text(), contaminated)
