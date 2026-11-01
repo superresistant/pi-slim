@@ -34,6 +34,18 @@ def mime(path):
     return subprocess.run(["file", "--brief", "--mime-type", path], capture_output=True, text=True).stdout.strip()
 
 
+def is_text(path):
+    with open(path, "rb") as handle:
+        head = handle.read(65536)
+    if b"\0" in head:
+        return False
+    try:
+        head.decode("utf-8")
+    except UnicodeDecodeError as error:
+        return error.start >= len(head) - 3
+    return True
+
+
 def editor_command(path, line, col):
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "micro"
     name = os.path.basename(editor.split()[0])
@@ -58,7 +70,7 @@ def main():
     if not os.path.exists(path):
         return 1
     kind = "" if os.path.isdir(path) else mime(path)
-    if kind.startswith("text/") or kind in TEXT_TYPES:
+    if kind.startswith("text/") or kind in TEXT_TYPES or (kind and not kind.startswith("image/") and is_text(path)):
         command = editor_command(path, line, col)
     elif kind.startswith("image/") and kind != "image/svg+xml":
         command = [shutil.which("kitten") or "kitten", "icat", "--hold", path]

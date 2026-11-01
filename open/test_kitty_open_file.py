@@ -55,6 +55,8 @@ class OpenFileTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertRegex(calls[0], r"launch .* --location=vsplit .*kitten icat --hold .*/shot\.png$")
         self.assertEqual(self.run_opener("doc.pdf"), (0, [f"xdg-open {self.project}/doc.pdf"]))
+        (self.project / "fake.py").write_text('x = 1\nPDF = b"%PDF-1.4"\n' + "y = 2\n" * 50)
+        self.assertEqual(self.run_opener("fake.py:2"), (0, self.launch("micro", "+2", str(self.project / "fake.py"))))
         self.assertEqual(self.run_opener("src"), (0, [f"xdg-open {self.project}/src"]))
 
     def test_elsewhere_and_outside_kitty_use_default_app(self):
