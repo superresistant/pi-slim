@@ -1,3 +1,4 @@
+import json
 import os
 import runpy
 import subprocess
@@ -11,6 +12,7 @@ module = runpy.run_path(Path(__file__).with_name("clipclean"), run_name="clipcle
 detect_tui_paste = module["detect_tui_paste"]
 clean_tui_paste = module["clean_tui_paste"]
 get_clipboard = module["get_clipboard"]
+cleaned = module["cleaned"]
 
 
 class ClipcleanTest(unittest.TestCase):
@@ -124,6 +126,11 @@ class WatchTest(unittest.TestCase):
         time.sleep(1.5)
         self.assertEqual(calls(), settled)
         self.assertEqual(settled, 4)
+
+    def test_rust_port_golden_cases_current(self):
+        cases = json.loads((Path(__file__).resolve().parent / "rs/tests/golden.json").read_text())
+        for case in cases:
+            self.assertEqual(cleaned(case["text"]), case["cleaned"], "clip/rs/tests/golden.json stale: run clip/gen_golden.py")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+[package]
+name = "clipclean"
+version = "0.1.0"
+edition = "2021"
+description = "Unwrap TUI-padded terminal copies (port of terminal/clip/clipclean)"
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+serde_json = "1"
