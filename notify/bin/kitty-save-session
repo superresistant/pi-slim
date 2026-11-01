@@ -28,7 +28,7 @@ if ! timeout 15 kitty @ --to "$listen_on" action save_as_session --save-only --u
     [ "$auto" -eq 1 ] && exit 75
     exit 1
 fi
-if ! python3 - "$tmp" "$listen_on" "$(dirname "$(realpath "$0")")" <<'PY'
+if ! python3 - "$tmp" "$listen_on" <<'PY'
 import json
 import os
 import shlex
@@ -76,11 +76,6 @@ windows = read_windows()
 if not windows:
     sys.exit("kitty @ ls unavailable; keeping previous session")
 
-sys.path.insert(0, sys.argv[3])
-import session_registry
-
-registry = session_registry.read()
-
 def read_agents():
     try:
         result = subprocess.run(["bus", "agents", "--json"], check=True, capture_output=True, text=True, timeout=5)
@@ -89,17 +84,11 @@ def read_agents():
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
         return None
 
-agents = read_agents()
-registered = {entry["pid"]: entry for entry in registry if entry["alive"]}
+pi_windows = any(os.path.basename(str((process.get("cmdline") or [""])[0])) == "pi"
+                 for window in windows.values() for process in (window or {}).get("foreground_processes", []))
+agents = read_agents() if pi_windows else {}
 if agents is None:
-    for window in windows.values():
-        for process in (window or {}).get("foreground_processes", []):
-            if process.get("cmdline", [""])[:1] == ["pi"] and process.get("pid") not in registered:
-                sys.exit("bus agents unavailable; keeping previous session")
-    agents = {}
-else:
-    session_registry.prune(registry, [a.get("session") for a in agents.values()])
-agents.update(registered)
+    sys.exit("bus agents unavailable; keeping previous session")
 
 def foreground_session(window_id):
     window = windows.get(window_id)
