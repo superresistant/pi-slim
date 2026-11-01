@@ -8,21 +8,7 @@
 # clipclean watch daemon when text is pasted immediately after selection.
 set -euo pipefail
 
-socket=${KITTY_LISTEN_ON:-}
-if [[ -z "$socket" ]]; then
-    sock_path=
-    for candidate in /tmp/kitty-*; do
-        [[ -S "$candidate" ]] || continue
-        if [[ -z "$sock_path" || "$candidate" -nt "$sock_path" ]]; then
-            sock_path=$candidate
-        fi
-    done
-    if [[ -z "$sock_path" ]]; then
-        echo "kitty-paste: no kitty control socket in /tmp" >&2
-        exit 1
-    fi
-    socket="unix:$sock_path"
-fi
+socket=${KITTY_LISTEN_ON:?kitty-paste: run from Kitty (launch --copy-env)}
 
 target=()
 if [[ ${KITTY_WINDOW_ID:-} =~ ^[0-9]+$ ]]; then
@@ -42,7 +28,7 @@ else
     xclip -selection clipboard -t UTF8_STRING -o > "$paste_file"
     {
         printf '\033[200~'
-        cat "$paste_file"
+        tr -d '\033' < "$paste_file"
         printf '\033[201~'
     } | kitten @ --to "$socket" send-text "${target[@]}" --stdin --bracketed-paste disable
 fi

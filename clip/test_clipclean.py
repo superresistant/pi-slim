@@ -53,7 +53,7 @@ class ClipcleanTest(unittest.TestCase):
 
     def test_long_paste_uses_one_bracketed_paste(self):
         helper = Path(__file__).with_name("kitty-paste")
-        text = "x" * 9000
+        text = "x" * 9000 + "\x1b[201~rm -rf ~\n"
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             capture = tmp_path / "capture"
@@ -79,7 +79,8 @@ class ClipcleanTest(unittest.TestCase):
             }
             subprocess.run([helper], env=env, check=True)
             payload = capture.read_bytes()
-            self.assertEqual(payload, b"\x1b[200~" + text.encode() + b"\x1b[201~")
+            self.assertEqual(payload, b"\x1b[200~" + text.replace("\x1b", "").encode() + b"\x1b[201~")
+            self.assertEqual(payload.count(b"\x1b"), 2)
             args = args_capture.read_text()
             self.assertIn("--match id:123", args)
             self.assertIn("--bracketed-paste disable", args)
