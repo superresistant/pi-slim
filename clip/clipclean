@@ -224,6 +224,7 @@ def watch(changes=None):
             last = cleaned(text) or text
             if last != text:
                 set_clipboard(last)
+                print(f"cleaned {len(text)} -> {len(last)} chars", flush=True)
 
 
 if __name__ == "__main__":
