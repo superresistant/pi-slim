@@ -11,7 +11,7 @@
     ]
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test test.mjs && node notify/test/notify.cjs && python3 -B notify/test/notify.py && node notify/test/gnome-notification-limit.cjs && python3 -B notify/test/kitty-save-session.py && (cd note && node --test note.test.mjs && python3 -B kitty_notes_test.py) && python3 -B clip/test_clipclean.py && python3 -B -m unittest -q ppp/test_shortcuts.py",
+    "test": "node --experimental-strip-types --test test.mjs && node notify/test/notify.cjs && python3 -B notify/test/notify.py && node notify/test/gnome-notification-limit.cjs && python3 -B notify/test/kitty-save-session.py && (cd note && node --test note.test.mjs) && python3 -B clip/test_clipclean.py && python3 -B -m unittest -q ppp/test_shortcuts.py",
     "test:helper": "node --experimental-strip-types --test helper-integration.test.mjs && python3 -B notify/test/kitty-layout-restore.py"
   },
   "keywords": [
