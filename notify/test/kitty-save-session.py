@@ -342,6 +342,13 @@ class SaveSessionTest(unittest.TestCase):
         result = self.save(launch(self.serialized, '--var=aa=1', str(aa), 'attach') + '\n')
         self.assertEqual(shlex.split(result), ['launch', self.serialized, '--var=aa=1', str(aa), 'attach'])
 
+    def test_aa_over_ssh_restores_ssh(self):
+        self.live[0]['tabs'][0]['windows'][0]['foreground_processes'] = [
+            {'pid': 4242, 'cwd': '/w', 'cmdline': ['ssh', '-t', 'aamu@localhost']}]
+        ssh = 'kitty-unserialize-data=' + json.dumps({"id": 7, "cmd_at_shell_startup": ["ssh", "-t", "aamu@localhost"]})
+        result = self.save(launch(ssh, '--var=aa=1', '--cwd=/w', '/bin/bash', '--posix') + '\n')
+        self.assertEqual(shlex.split(result), ['launch', ssh, '--var=aa=1', '--cwd=/w', '/bin/bash', '--posix'])
+
 
 if __name__ == "__main__":
     unittest.main()
