@@ -112,10 +112,13 @@ def foreground_session(window_id):
 
 SAFE_STARTUP = {"pi", "aa", "ssh", "vim", "nvim", "vi", "nano", "less", "man", "htop", "btop", "top"}
 
-def runs_ssh(window_ids):
+def ssh_command(window_ids):
     window = windows.get(window_ids[0]) if len(window_ids) == 1 else None
-    return any(os.path.basename(str((process.get("cmdline") or [""])[0])) == "ssh"
-               for process in (window or {}).get("foreground_processes", []))
+    for process in (window or {}).get("foreground_processes", []):
+        cmdline = [str(word) for word in process.get("cmdline") or []]
+        if cmdline and os.path.basename(cmdline[0]) == "ssh":
+            return cmdline
+    return None
 
 def safe_startup(command):
     try:
@@ -158,8 +161,9 @@ def rewrite_launch(line):
     if drop or changed:
         tokens = [token for index, token in enumerate(tokens) if index not in drop]
         line = " ".join(shlex.quote(token) for token in tokens)
-    if "--var=aa=1" in options(tokens) and not runs_ssh(window_ids):
-        return with_command(tokens, [shutil.which("aa") or "aa", "attach"])
+    if "--var=aa=1" in options(tokens):
+        ssh = ssh_command(window_ids)
+        return with_command(tokens, ssh or [shutil.which("aa") or "aa", "attach"])
     session, cwd = foreground_session(window_ids[0]) if len(window_ids) == 1 and type(window_ids[0]) is int and window_ids[0] > 0 else ("", "")
     if not session:
         return line

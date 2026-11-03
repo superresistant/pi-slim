@@ -347,7 +347,9 @@ class SaveSessionTest(unittest.TestCase):
             {'pid': 4242, 'cwd': '/w', 'cmdline': ['ssh', '-t', 'aamu@localhost']}]
         ssh = 'kitty-unserialize-data=' + json.dumps({"id": 7, "cmd_at_shell_startup": ["ssh", "-t", "aamu@localhost"]})
         result = self.save(launch(ssh, '--var=aa=1', '--cwd=/w', '/bin/bash', '--posix') + '\n')
-        self.assertEqual(shlex.split(result), ['launch', ssh, '--var=aa=1', '--cwd=/w', '/bin/bash', '--posix'])
+        self.assertEqual(shlex.split(result), ['launch', ssh, '--var=aa=1', '--cwd=/w', 'ssh', '-t', 'aamu@localhost'])
+        result = self.save(launch('kitty-unserialize-data=' + json.dumps({"id": 7}), '--var=aa=1', '--cwd=/w') + '\n')
+        self.assertEqual(shlex.split(result), ['launch', 'kitty-unserialize-data=' + json.dumps({"id": 7}), '--var=aa=1', '--cwd=/w', 'ssh', '-t', 'aamu@localhost'])
 
 
 if __name__ == "__main__":
